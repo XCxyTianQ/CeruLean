@@ -14,6 +14,7 @@ rootProject.name = "cerulean"
 
 include("cerulean-api")
 include("cerulean-server")
+include("cerulean-checkstyle")
 
 gradle.lifecycle.beforeProject {
     val mcVersion = providers.gradleProperty("mcVersion").get().trim()

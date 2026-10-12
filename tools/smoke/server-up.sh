@@ -54,8 +54,16 @@ fi
 echo "启动服务端: $JAR"
 echo "  运行目录 $RUN_DIR / 游戏端口 $MC_PORT / RCON $RCON_PORT / 堆 $JAVA_MEM"
 cd "$RUN_DIR"
-nohup "$JAVA_BIN" "-Xmx$JAVA_MEM" -jar "$JAR" --nogui --port "$MC_PORT" \
-  > "$RUN_DIR/server-console.log" 2>&1 &
+# MC_LIBS_DIR 非空时按 classpath 方式启动（用于运行"重建出来的裸 server jar"，
+# 而不是 paperclip 容器）；否则用 java -jar（paperclip 容器自带依赖）。
+if [ -n "${MC_LIBS_DIR:-}" ]; then
+  echo "  以 classpath 方式启动：$JAR + $MC_LIBS_DIR/*"
+  nohup "$JAVA_BIN" "-Xmx$JAVA_MEM" -cp "$JAR:$MC_LIBS_DIR/*" org.bukkit.craftbukkit.Main \
+    --nogui --port "$MC_PORT" > "$RUN_DIR/server-console.log" 2>&1 &
+else
+  nohup "$JAVA_BIN" "-Xmx$JAVA_MEM" -jar "$JAR" --nogui --port "$MC_PORT" \
+    > "$RUN_DIR/server-console.log" 2>&1 &
+fi
 echo $! > "$RUN_DIR/server.pid"
 echo "PID $(cat "$RUN_DIR/server.pid")，日志 $RUN_DIR/server-console.log"
 

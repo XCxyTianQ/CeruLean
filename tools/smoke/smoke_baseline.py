@@ -64,8 +64,41 @@ class Suite:
 
     Y = 100
 
-    def cleanup_area(self):
-        self.cmd(f"fill {self.x - 2} {self.Y - 2} {self.z - 2} {self.x + 12} {self.Y + 8} {self.z + 12} minecraft:air replace", wait=0.6)
+    # 测试区范围（含 forceload 覆盖）：x ∈ [x-16, x+64]，z ∈ [z-16, z+32]
+    def area_bounds(self):
+        return (self.x - 16, self.z - 16, self.x + 64, self.z + 32)
+
+    def setup_area(self):
+        """显式 forceload 测试区。
+
+        必要性：Paper/Folia（Moonrise 区块系统）在**没有玩家在线**时不会常驻加载出生点区块，
+        未加载区块上的 setblock/fill/clone 会直接报 "That position is not loaded"，
+        命令方块也不会 tick。冒烟测试必须在无玩家环境下自洽，所以由用例自己加载区块。
+        """
+        x0, z0, x1, z1 = self.area_bounds()
+        self.cmd(f"forceload add {x0} {z0} {x1} {z1}", wait=1.2)
+        self.cmd(f"scoreboard objectives remove {self.prefix}_probe")
+        self.cmd(f"scoreboard objectives add {self.prefix}_probe dummy")
+        loaded = self.cmd(f"execute if block {self.x} {self.Y} {self.z} minecraft:air run time query gametime", wait=0.6)
+        if "not loaded" in loaded.lower():
+            self.record("forceload_setup", ERROR, "测试区块仍未加载，请检查服务器是否允许 forceload")
+            return False
+        self.cmd(f"fill {self.x - 2} {self.Y - 2} {self.z - 2} {self.x + 62} {self.Y + 10} {self.z + 30} minecraft:air replace", wait=1.0)
+        return True
+
+    def teardown_area(self):
+        x0, z0, x1, z1 = self.area_bounds()
+        self.cmd(f"scoreboard objectives remove {self.prefix}_probe")
+        self.cmd(f"forceload remove {x0} {z0} {x1} {z1}", wait=0.8)
+
+    # RCON 收不到 say/broadcast 这类聊天输出（实测：Paper 26.3 上 say 的文本不会回给 RCON），
+    # 因此所有"条件是否成立"的判定都改成**状态探针**：条件成立就写记分板，再读回来。
+    def probe(self, token, condition):
+        obj = f"{self.prefix}_probe"
+        self.cmd(f"scoreboard players set {token} {obj} 0")
+        self.cmd(f"{condition} run scoreboard players set {token} {obj} 1")
+        out = self.cmd(f"scoreboard players get {token} {obj}")
+        return " has 1 " in out
 
     # ── 用例 ──────────────────────────────────────────────
     def case_rcon_alive(self):
@@ -74,9 +107,17 @@ class Suite:
                     f"list -> {out.strip()[:60]!r}")
 
     def case_version(self):
-        out = self.cmd("version", wait=0.5)
-        ok = bool(out.strip())
+        out = ""
+        for _ in range(6):
+            out = self.cmd("version", wait=1.0)
+            if self.mc_version and self.mc_version in out:
+                self.expect("version", True, out.strip().splitlines()[0][:90])
+                return
+            if out.strip() and "checking version" not in out.lower():
+                break
+            time.sleep(1.0)
         detail = out.strip().splitlines()[0][:90] if out.strip() else "(空)"
+        ok = bool(out.strip())
         if ok and self.mc_version:
             ok = self.mc_version in out
             detail += f"  [期望含 {self.mc_version}]"
@@ -93,10 +134,10 @@ class Suite:
         self.cmd(f"setblock {tx} {self.Y} {self.z} minecraft:air")
         self.cmd(f"setblock {self.x} {self.Y} {self.z} minecraft:command_block"
                  f'{{Command:"setblock {tx} {self.Y} {self.z} minecraft:redstone_block",auto:1b}}')
-        time.sleep(1.2)
-        out = self.cmd(f"execute if block {tx} {self.Y} {self.z} minecraft:redstone_block run say IMPULSE_OK")
-        self.expect("impulse_auto_executes", "IMPULSE_OK" in out or "Test passed" in out or "passed" in out.lower(),
-                    f"目标方块 -> {out.strip()[:60]!r}")
+        time.sleep(2.5)
+        hit = self.probe("probe_impulse",
+                         f"execute if block {tx} {self.Y} {self.z} minecraft:redstone_block")
+        self.expect("impulse_auto_executes", hit, "脉冲(auto)命令方块已执行" if hit else "目标方块未出现")
 
     def case_chain_order(self):
         """3 连链：脉冲(auto) → 链1(auto) → 链2(auto)，全部 up 朝向；期望依次执行。"""
@@ -107,12 +148,12 @@ class Suite:
             self.cmd(f"setblock {b} {self.Y + i} {self.z} "
                      f"minecraft:{'command_block' if i == 0 else 'chain_command_block'}[facing=up]"
                      f'{{Command:"setblock {b + 2} {self.Y + i} {tz} minecraft:redstone_block",auto:1b}}')
-        time.sleep(1.5)
+        time.sleep(2.5)
         hits = 0
         for i in range(3):
             tz = self.z + 2 + i
-            out = self.cmd(f"execute if block {b + 2} {self.Y + i} {tz} minecraft:redstone_block run say CHAIN{i}")
-            if f"CHAIN{i}" in out or "passed" in out.lower():
+            if self.probe(f"probe_chain{i}",
+                          f"execute if block {b + 2} {self.Y + i} {tz} minecraft:redstone_block"):
                 hits += 1
         self.expect("chain_executes_in_order", hits == 3, f"{hits}/3 个链节点已执行")
 
@@ -125,9 +166,9 @@ class Suite:
                  f'{{Command:"setblock {b + 2} 9999 {self.z} minecraft:redstone_block",auto:1b}}')
         self.cmd(f"setblock {b} {self.Y + 1} {self.z} minecraft:chain_command_block[facing=up]"
                  f'{{Command:"setblock {b + 2} {self.Y + 1} {self.z + 1} minecraft:redstone_block",auto:1b}}')
-        time.sleep(1.5)
-        out = self.cmd(f"execute if block {b + 2} {self.Y + 1} {self.z + 1} minecraft:redstone_block run say CHAIN_CONTINUED")
-        continued = "CHAIN_CONTINUED" in out or "passed" in out.lower()
+        time.sleep(2.5)
+        continued = self.probe("probe_chainfail",
+                               f"execute if block {b + 2} {self.Y + 1} {self.z + 1} minecraft:redstone_block")
         self.record("chain_on_failure(OBSERVED)", OBSERVED,
                     "前序失败后链" + ("**继续执行**" if continued else "**停止**"))
 
@@ -145,11 +186,9 @@ class Suite:
     def case_fill_and_clone(self):
         ax, az = self.x + 30, self.z
         self.cmd(f"fill {ax} {self.Y} {az} {ax + 2} {self.Y} {az} minecraft:glass replace")
-        got = self.cmd(f"execute if block {ax + 1} {self.Y} {az} minecraft:glass run say FILL_OK")
-        fill_ok = "FILL_OK" in got or "passed" in got.lower()
+        fill_ok = self.probe("probe_fill", f"execute if block {ax + 1} {self.Y} {az} minecraft:glass")
         self.cmd(f"clone {ax} {self.Y} {az} {ax + 2} {self.Y} {az} {ax} {self.Y} {az + 5}")
-        got2 = self.cmd(f"execute if block {ax + 2} {self.Y} {az + 5} minecraft:glass run say CLONE_OK")
-        clone_ok = "CLONE_OK" in got2 or "passed" in got2.lower()
+        clone_ok = self.probe("probe_clone", f"execute if block {ax + 2} {self.Y} {az + 5} minecraft:glass")
         self.expect("fill_region", fill_ok, "3 格玻璃已铺")
         self.expect("clone_region", clone_ok, "克隆到 +5 格处")
 
@@ -243,10 +282,12 @@ def main(argv=None):
     rc = Rcon(args.host, args.port, args.password, quiet=not args.verbose)
     suite = Suite(rc, area, args.prefix, args.expect_mc, args.verbose)
     try:
-        suite.cleanup_area()
+        if not suite.setup_area():
+            print("[错误] 测试区加载失败：无法进行语义测试", file=sys.stderr)
+            return 2
         code = suite.run(only=args.only or None, skip=args.skip or None)
         if not args.no_cleanup:
-            suite.cleanup_area()
+            suite.teardown_area()
     except RconError as exc:
         print(f"[错误] {exc}", file=sys.stderr)
         return 2

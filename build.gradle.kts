@@ -29,11 +29,27 @@ paperweight {
             outputFile = file("cerulean-api/build.gradle.kts")
             patchFile = file("cerulean-api/build.gradle.kts.patch")
         }
+        patchFile {
+            path = "paper-checkstyle/build.gradle.kts"
+            outputFile = file("cerulean-checkstyle/build.gradle.kts")
+            patchFile = file("cerulean-checkstyle/build.gradle.kts.patch")
+        }
         patchDir("paperApi") {
             upstreamPath = "paper-api"
             excludes = setOf("build.gradle.kts")
             patchesDir = file("cerulean-api/paper-patches")
             outputDir = file("paper-api")
+        }
+        patchDir("paperCheckstyle") {
+            upstreamPath = "paper-checkstyle"
+            excludes = setOf("build.gradle.kts")
+            patchesDir = file("cerulean-checkstyle/paper-patches")
+            outputDir = file("paper-checkstyle")
+        }
+        patchDir("paperCheckstyleConfig") {
+            upstreamPath = ".checkstyle"
+            patchesDir = file("cerulean-checkstyle/config-patches")
+            outputDir = file(".checkstyle")
         }
     }
 }

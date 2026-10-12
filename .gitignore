@@ -9,6 +9,9 @@ build
 /paper-api-generator
 /cerulean-server/build.gradle.kts
 /cerulean-api/build.gradle.kts
+/cerulean-checkstyle/build.gradle.kts
+/paper-checkstyle
+/.checkstyle
 /cerulean-server/src/minecraft
 
 .idea/
