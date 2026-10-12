@@ -3,8 +3,11 @@
 > 从**试验性项目**转向**半投入生产的实验项目**的 Minecraft 服务端发行版。
 > 定位：以 **Paper 主线 stable** 为基座，逐步移植 **Folia 的区域化多线程 tick**，并整体继承 **AzureBranches 的命令语义（OCC）与存储引擎**资产。
 
-**当前阶段：Phase 1 — 基础工作（构建接入 + 语义基线）**
-Phase 0（可复现校验流水线）已完成并通过实测；Phase 1 正在接入 paperweight 构建与参数化冒烟基线。
+**当前阶段：Phase 1 基础工作已完成（构建打通 + 语义基线）**
+- ✅ **能构建**：`applyAllPatches` + `createPaperclipJar` 在本机（HarmonyOS / aarch64 / Java 25）实测成功
+- ✅ **能验证**：自己的分发链用 `tools/verify` 复现 → `RESULT: PASS`
+- ✅ **能运行**：产物服务端实际启动、响应 RCON，`version` 显示 `running CeruLean version 26.3-DEV-main@e237bd9`
+- ✅ **能回归**：语义基线冒烟对自家 jar 实测 `PASS 8 / OBSERVED 4 / FAIL 0`
 
 ---
 
@@ -49,7 +52,7 @@ CeruLean/
 │   ├── verify/                       上游复现与漂移校验（Phase 0，已实测）
 │   ├── smoke/                        参数化 RCON 冒烟基线 + 服务器启停
 │   └── gradle-local.sh               本机 Gradle 启动器（绕开 gradlew 的 shell 问题）
-├── docs/                             00 立项与约束 · 01 pin 策略 · 02 校验手册 · 03 构建接入 · 04 Phase1 范围
+├── docs/                             00 立项与约束 · 01 pin 策略 · 02 校验手册 · 03 构建接入 · 04 Phase1 范围 · 05 命令方块语义基线
 └── .github/workflows/                verify.yml（复现校验/漂移巡检）· build.yml（构建+冒烟）
 ```
 
@@ -57,13 +60,16 @@ CeruLean/
 
 ## 快速开始
 
-### 1) 构建（首次很慢：拉取上游 + 反编译 Minecraft）
+### 1) 构建（首次很慢：拉取上游 + 反编译 Minecraft，实测约 6–10 分钟）
 
 ```sh
-tools/gradle-local.sh applyAllPatches      # 本机用这个；有真 bash 的环境直接 ./gradlew
-./gradlew build
-./gradlew :cerulean-server:createPaperclipJar   # 产出分发 jar
+tools/gradle-local.sh applyAllPatches                     # 本机用这个；有真 bash 的环境直接 ./gradlew
+tools/gradle-local.sh :cerulean-server:createPaperclipJar # 产出分发 jar
+# 产物：cerulean-server/build/libs/cerulean-paperclip-26.3.local-SNAPSHOT.jar
 ```
+
+> 本机注意：`./gradlew` 在本机 shell 下会报 `Could not find or load main class "-Xmx64m"`，请用
+> `tools/gradle-local.sh`（还需 `GIT_CONFIG_GLOBAL`，脚本已内置）。详见 `docs/03-构建接入.md`。
 
 ### 2) 验证"上游发行物可复现"（无需构建）
 
@@ -86,6 +92,6 @@ CERULEAN_EULA=TRUE tools/smoke/run-smoke.sh <paperclip.jar> ./smoke-report
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | Phase 0 | 基座 pin 登记、复现校验工具、三方补丁栈目录、CI | ✅ 完成（校验 `RESULT: PASS`、自测 `SELFTEST: PASS`） |
-| Phase 1 | paperweight 构建接入、参数化冒烟基线、构建 CI | 🔄 进行中 |
+| Phase 1 | paperweight 构建接入、参数化冒烟基线、构建 CI | ✅ **基础工作完成**（构建/校验/运行/回归四条链路均实测通过；`AzLinear v4` 移植与发布策略未做） |
 | Phase 2 | 区域化移植（入口点：Paper 26.2 stable + Folia 26.2 补丁） | ⏳ 未开始 |
 | Phase 3 | 生产加固（多 world、崩溃恢复、watchdog/profiler、soak） | ⏳ 未开始 |
