@@ -1,0 +1,15 @@
+<!-- CeruLean Cores · 图标（由 tools/icon/gen_icon.py 生成，勿手改） -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect x="0" y="0" width="1024" height="1024" fill="#F8FBFE"/>
+  <circle cx="512" cy="400" r="300" fill="#7FB6E0" stroke="#0E2A47" stroke-width="14"/>
+  <circle cx="512" cy="400" r="244" fill="#DCEBF7" stroke="none"/>
+  <line x1="512" y1="400" x2="781.33" y2="555.50" stroke="#DCEBF7" stroke-width="30" stroke-linecap="butt"/>
+  <line x1="512" y1="400" x2="242.67" y2="555.50" stroke="#DCEBF7" stroke-width="30" stroke-linecap="butt"/>
+  <line x1="512" y1="400" x2="512.00" y2="89.00" stroke="#DCEBF7" stroke-width="30" stroke-linecap="butt"/>
+  <circle cx="512.00" cy="596.00" r="26" fill="#1E6FB8" stroke="#0E2A47" stroke-width="8"/>
+  <circle cx="342.26" cy="302.00" r="26" fill="#1E6FB8" stroke="#0E2A47" stroke-width="8"/>
+  <circle cx="681.74" cy="302.00" r="26" fill="#1E6FB8" stroke="#0E2A47" stroke-width="8"/>
+  <circle cx="512" cy="400" r="92" fill="#0E2A47" stroke="#DCEBF7" stroke-width="10"/>
+  <path d="M 557.85 447.48 A 66 66 0 1 1 557.85 352.52 L 538.40 372.67 A 38 38 0 1 0 538.40 427.33 Z" fill="#FFFFFF" stroke="none"/>
+  <text x="512" y="888" font-family="HarmonyOS Sans, Noto Sans, DejaVu Sans, sans-serif" font-size="166" font-weight="700" text-anchor="middle" fill="#0E2A47">CeruLean</text>
+</svg>
