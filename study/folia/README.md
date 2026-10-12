@@ -11,7 +11,7 @@
 | 补丁 | `folia-server/minecraft-patches/features/0001-Region-Threading-Base.patch`（20,221 行 / 1.09 MB） |
 | 为什么用 26.2 而不是 26.1.x | 26.2 是最新分支；实测两版的**新增文件完全相同**（13 个），26.2 只多了少量细节 |
 | 许可 | GPLv3（与 CeruLean 一致）。`src/` 是从上游补丁还原的**原始代码**，仅用于阅读与对照，**不作为我们的实现**；将来若直接复用必须保留署名与派生声明 |
-| 还原方式 | 解析补丁中 `new file mode` 段落，剥离 `+` 前缀后按原路径落盘（脚本逻辑见 `patch-index.json`） |
+| 还原方式 | 解析补丁中 `new file mode` 段落，剥离 `+` 前缀后按原路径落盘（脚本逻辑见 `patch-index.json`）；`TickRegions.java` 是从占位被改写的那份，单独按 hunk 还原 |
 
 ## 真实规模（纠正一个此前的不准确说法）
 
@@ -64,8 +64,8 @@ public class TickRegions {
 | **02** | `addChunk/removeChunk/onRegionRelease`：分裂与合并算法 + 区域边界何时变 | 276–673、805–994 | ✅ 见 [notes/02](notes/02-分裂与合并算法.md) |
 | **03** | `ThreadedRegion`：所有权查询、中心点启发式（**含一处验证过的 bug**） | 674–805 | ✅ 见 [notes/03](notes/03-ThreadedRegion-所有权与中心点.md) |
 | **04** | `ThreadedRegionSection`：位图、生/死判定、空段为何必须存在 | 1023–1246 | ✅ 见 [notes/04](notes/04-ThreadedRegionSection-段的生命周期.md) |
-| 05 | `RegionizedData` + `RegioniserCallback`：锁外如何承载世界状态 | 235 | ⏳ |
-| 06 | `RegionizedWorldData`：单 world 的区域化状态 | 787 | ⏳ |
+| **05** | `RegionizedData` + `RegioniserCallback`：挂载机制、tick 偏移数学、失败语义 | 235 | ✅ 见 [notes/05](notes/05-RegionizedData-挂载与迁移契约.md) |
+| **06** | `RegionizedWorldData`：世界状态如何跨区域迁移（含分发链全图） | 787 | ✅ 见 [notes/06](notes/06-RegionizedWorldData-世界状态如何迁移.md) |
 | 07 | `TickRegionScheduler`：区域如何被调度到线程 | 562 | ⏳ |
 | 08 | `RegionizedServer` + `RegionizedTaskQueue`：全局 tick 与跨区域任务 | 427+863 | ⏳ |
 | 09 | `scheduler/FoliaRegionScheduler` + `TeleportUtils` + `RegionShutdownThread` + util/commands | 931 | ⏳ |
