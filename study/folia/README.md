@@ -70,4 +70,4 @@ public class TickRegions {
 | **08** | `RegionizedServer`：全局 tick 与职责边界（全局 vs 区域） | 427 | ✅ 见 [notes/08](notes/08-RegionizedServer-全局tick与职责边界.md) |
 | **09** | `RegionizedTaskQueue`：**跨区域影响的原语**（段级票据 + 队列路由 + 有界排空） | 863 | ✅ 见 [notes/09](notes/09-RegionizedTaskQueue-跨区域影响的原语.md) |
 | **10** | API 层与周边 + **提炼五条可复用模式**（FoliaRegionScheduler/TeleportUtils/Shutdown） | 738 | ✅ 见 [notes/10](notes/10-API层与周边-可复用模式.md) |
-| 11 | 187 个 hook 点（`ServerLevel` 62 / `MinecraftServer` 40 / `Entity` 27 / `Level` 25 …）+ `util/*` + `commands/*` | — | ⏳ |
+| **11** | **Hook 施工图**：187 个接线点的分布/分类/优先级（自研路线的施工依据） | 694 hunk | ✅ 见 [notes/11](notes/11-Hook施工图.md) |
