@@ -69,5 +69,5 @@ public class TickRegions {
 | **07** | `TickRegionScheduler`：EDF/工作窃取、隐式上下文、fail-stop 失败模型 | 562 | ✅ 见 [notes/07](notes/07-TickRegionScheduler-区域如何被调度.md) |
 | **08** | `RegionizedServer`：全局 tick 与职责边界（全局 vs 区域） | 427 | ✅ 见 [notes/08](notes/08-RegionizedServer-全局tick与职责边界.md) |
 | **09** | `RegionizedTaskQueue`：**跨区域影响的原语**（段级票据 + 队列路由 + 有界排空） | 863 | ✅ 见 [notes/09](notes/09-RegionizedTaskQueue-跨区域影响的原语.md) |
-| 10 | `scheduler/FoliaRegionScheduler` + `TeleportUtils` + `RegionShutdownThread` + util/commands | 931 | ⏳ |
-| 11 | 187 个 hook 点（按 hunk 排序，先 `ServerLevel`(62)/`MinecraftServer`(40)/`Entity`(27)/`Level`(25)） | — | ⏳ |
+| **10** | API 层与周边 + **提炼五条可复用模式**（FoliaRegionScheduler/TeleportUtils/Shutdown） | 738 | ✅ 见 [notes/10](notes/10-API层与周边-可复用模式.md) |
+| 11 | 187 个 hook 点（`ServerLevel` 62 / `MinecraftServer` 40 / `Entity` 27 / `Level` 25 …）+ `util/*` + `commands/*` | — | ⏳ |
