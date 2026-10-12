@@ -1,0 +1,9 @@
+build/
+.gradle/
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.class
+run/
+logs/
+drift.json
+report.json

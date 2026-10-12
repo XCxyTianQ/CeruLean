@@ -1,0 +1,80 @@
+name: Verify Upstream Chain
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # 每天 02:17 UTC 巡检上游是否有新构建（漂移巡检）
+    - cron: "17 2 * * *"
+
+env:
+  PINNED_VERSION: "26.3"
+  PINNED_BUILD: "175"
+
+jobs:
+  verify:
+    name: 复现校验 + 负向自测
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: 缓存上游工件（原版 bundler 约 62 MB）
+        uses: actions/cache@v4
+        with:
+          path: ~/.cerulean-cache
+          key: cerulean-cache-${{ env.PINNED_VERSION }}-${{ env.PINNED_BUILD }}-${{ hashFiles('gradle.properties') }}
+
+      - name: 复现上游发行 jar（全链哈希）
+        run: |
+          chmod +x tools/verify/cerulean-verify
+          tools/verify/cerulean-verify upstream \
+            --version "$PINNED_VERSION" --build "$PINNED_BUILD" \
+            --report upstream-report.json
+
+      - name: 负向自测（证明校验器非空转）
+        run: tools/verify/cerulean-verify selftest --version "$PINNED_VERSION" --build "$PINNED_BUILD"
+
+      - name: 上传校验报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-report
+          path: upstream-report.json
+          if-no-files-found: warn
+
+  drift-watch:
+    name: 漂移巡检（新构建/新版本告警）
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查上游是否出现比 pin 更新的构建
+        run: |
+          set -e
+          api="https://fill.papermc.io/v3/projects/paper/versions/${PINNED_VERSION}/builds"
+          latest=$(curl -fsSL "$api" | tr ',' '\n' | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          echo "上游最新构建: $latest / 本项目 pin: $PINNED_BUILD"
+          if [ "$latest" -gt "$PINNED_BUILD" ]; then
+            echo "::warning::上游已有更新的构建 #$latest（本项目 pin 在 #$PINNED_BUILD），请按 docs/01-上游层叠与pin策略.md 走升级流程"
+          fi
+
+      - name: 检查是否有更新的 Minecraft 正式版
+        run: |
+          set -e
+          latest_mc=$(curl -fsSL https://piston-meta.mojang.com/mc/game/version_manifest_v2.json \
+            | python3 -c "import sys,json;print(json.load(sys.stdin)['latest']['release'])")
+          echo "Mojang 最新正式版: $latest_mc / 本项目基座: $PINNED_VERSION"
+          if [ "$latest_mc" != "$PINNED_VERSION" ]; then
+            echo "::warning::Mojang 已发布 $latest_mc，本项目基座为 $PINNED_VERSION"
+          fi

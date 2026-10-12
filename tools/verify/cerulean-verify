@@ -1,0 +1,10 @@
+#!/bin/sh
+# CeruLean 复现校验工具入口（JDK 17+ 单文件源码运行，无需预编译）
+#   tools/verify/cerulean-verify upstream --version 26.3
+#   tools/verify/cerulean-verify diff <jarA> <jarB>
+#   tools/verify/cerulean-verify selftest
+# 可用环境变量 JAVA 指定 JDK（本机可用 ~/.harmonybrew/opt/openjdk@25/bin/java）
+set -e
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+JAVA_BIN=${JAVA:-java}
+exec "$JAVA_BIN" -Xmx3g -cp "$DIR" "$DIR/CeruLeanVerify.java" "$@"
