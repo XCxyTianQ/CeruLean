@@ -62,8 +62,8 @@ public class TickRegions {
 | **00** | 接入机制总览：两份补丁的分工、`TickRegions` 枢纽、启动链、类归属 | — | ✅ 见 [notes/00](notes/00-接入机制总览.md) |
 | **01** | `ThreadedRegionizer`：类型模型、设计参数、锁纪律、回调契约 | 1405（本轮读 1–275 + 1248–1405） | ✅ 见 [notes/01](notes/01-ThreadedRegionizer-类型与契约.md) |
 | **02** | `addChunk/removeChunk/onRegionRelease`：分裂与合并算法 + 区域边界何时变 | 276–673、805–994 | ✅ 见 [notes/02](notes/02-分裂与合并算法.md) |
-| 03 | `ThreadedRegion`：区域状态机（READY/TRANSIENT/TICKING/DEAD） | 674–1022 | ⏳ |
-| 04 | `ThreadedRegionSection`：段的所有权与生命周期 | 1023–1247 | ⏳ |
+| **03** | `ThreadedRegion`：所有权查询、中心点启发式（**含一处验证过的 bug**） | 674–805 | ✅ 见 [notes/03](notes/03-ThreadedRegion-所有权与中心点.md) |
+| **04** | `ThreadedRegionSection`：位图、生/死判定、空段为何必须存在 | 1023–1246 | ✅ 见 [notes/04](notes/04-ThreadedRegionSection-段的生命周期.md) |
 | 05 | `RegionizedData` + `RegioniserCallback`：锁外如何承载世界状态 | 235 | ⏳ |
 | 06 | `RegionizedWorldData`：单 world 的区域化状态 | 787 | ⏳ |
 | 07 | `TickRegionScheduler`：区域如何被调度到线程 | 562 | ⏳ |
