@@ -66,7 +66,8 @@ public class TickRegions {
 | **04** | `ThreadedRegionSection`：位图、生/死判定、空段为何必须存在 | 1023–1246 | ✅ 见 [notes/04](notes/04-ThreadedRegionSection-段的生命周期.md) |
 | **05** | `RegionizedData` + `RegioniserCallback`：挂载机制、tick 偏移数学、失败语义 | 235 | ✅ 见 [notes/05](notes/05-RegionizedData-挂载与迁移契约.md) |
 | **06** | `RegionizedWorldData`：世界状态如何跨区域迁移（含分发链全图） | 787 | ✅ 见 [notes/06](notes/06-RegionizedWorldData-世界状态如何迁移.md) |
-| 07 | `TickRegionScheduler`：区域如何被调度到线程 | 562 | ⏳ |
-| 08 | `RegionizedServer` + `RegionizedTaskQueue`：全局 tick 与跨区域任务 | 427+863 | ⏳ |
-| 09 | `scheduler/FoliaRegionScheduler` + `TeleportUtils` + `RegionShutdownThread` + util/commands | 931 | ⏳ |
-| 10 | 187 个 hook 点（按 hunk 排序，先 `ServerLevel`(62)/`MinecraftServer`(40)/`Entity`(27)/`Level`(25)） | — | ⏳ |
+| **07** | `TickRegionScheduler`：EDF/工作窃取、隐式上下文、fail-stop 失败模型 | 562 | ✅ 见 [notes/07](notes/07-TickRegionScheduler-区域如何被调度.md) |
+| **08** | `RegionizedServer`：全局 tick 与职责边界（全局 vs 区域） | 427 | ✅ 见 [notes/08](notes/08-RegionizedServer-全局tick与职责边界.md) |
+| 09 | `RegionizedTaskQueue`：跨区域任务队列与区块任务优先级 | 863 | ⏳ |
+| 10 | `scheduler/FoliaRegionScheduler` + `TeleportUtils` + `RegionShutdownThread` + util/commands | 931 | ⏳ |
+| 11 | 187 个 hook 点（按 hunk 排序，先 `ServerLevel`(62)/`MinecraftServer`(40)/`Entity`(27)/`Level`(25)） | — | ⏳ |
