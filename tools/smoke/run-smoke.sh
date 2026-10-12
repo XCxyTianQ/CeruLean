@@ -5,8 +5,9 @@
 set -e
 JAR=${1:?用法: run-smoke.sh <jar> [报告目录]}
 OUT=${2:-$PWD/smoke-report}
-DIR="$OUT"
 mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+DIR="$OUT"
 : "${RCON_PORT:=25575}"
 : "${RCON_PASSWORD:=test1234}"
 export RCON_PORT RCON_PASSWORD

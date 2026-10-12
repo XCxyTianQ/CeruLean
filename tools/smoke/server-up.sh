@@ -31,6 +31,8 @@ fi
 [ -f "$JAR" ] || { echo "找不到 jar: $JAR"; exit 2; }
 JAR=$(cd "$(dirname "$JAR")" && pwd)/$(basename "$JAR")
 mkdir -p "$RUN_DIR"
+# 绝对化：后面会 cd 进运行目录，相对路径再拼一次就会指向不存在的子目录
+RUN_DIR=$(cd "$RUN_DIR" && pwd)
 printf 'eula=true\n' > "$RUN_DIR/eula.txt"
 
 if [ ! -f "$RUN_DIR/server.properties" ]; then
@@ -67,9 +69,11 @@ fi
 echo $! > "$RUN_DIR/server.pid"
 echo "PID $(cat "$RUN_DIR/server.pid")，日志 $RUN_DIR/server-console.log"
 
-# 等 RCON 就绪（最多 180 秒）
+# 等 RCON 就绪（最多 420 秒）
+# 说明：paperclip 容器首次运行需要解包 62MB 原版 bundler + 103 个依赖库并现场打补丁，
+# 实测首次启动到 RCON 可用会超过 3 分钟（控制台刷进度符 >），因此上限放宽。
 i=0
-while [ $i -lt 90 ]; do
+while [ $i -lt 210 ]; do
   if python3 "$(dirname "$0")/rcon.py" --port "$RCON_PORT" --password "$RCON_PASSWORD" \
        --command list >/dev/null 2>&1; then
     echo "RCON 已就绪（等待 $((i * 2)) 秒）"

@@ -2,6 +2,7 @@
 # 停止 server-up.sh 启动的服务端（先 RCON stop，再兜底 kill）。
 set -e
 RUN_DIR=${1:-$PWD/smoke-run}
+[ -d "$RUN_DIR" ] && RUN_DIR=$(cd "$RUN_DIR" && pwd)
 RCON_PORT=${RCON_PORT:-25575}
 RCON_PASSWORD=${RCON_PASSWORD:-test1234}
 PIDFILE="$RUN_DIR/server.pid"

@@ -1,0 +1,9 @@
+# CeruLean 构建专用的 git 身份（paperweight 在生成仓库里需要提交者身份）
+# 通过 GIT_CONFIG_GLOBAL 指向本文件生效，**不修改**使用者的 ~/.gitconfig。
+[user]
+	name = CeruLean Build
+	email = build@cerulean.local
+[commit]
+	gpgsign = false
+[init]
+	defaultBranch = main
