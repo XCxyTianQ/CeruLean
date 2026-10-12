@@ -1,9 +1,24 @@
-build/
-.gradle/
-*.jar
-!gradle/wrapper/gradle-wrapper.jar
-*.class
-run/
-logs/
-drift.json
-report.json
+# Gradle
+.gradle
+build
+/run
+
+# 由 patcher 在上游 materialize 时生成（不入库）
+/paper-server
+/paper-api
+/paper-api-generator
+/cerulean-server/build.gradle.kts
+/cerulean-api/build.gradle.kts
+/cerulean-server/src/minecraft
+
+.idea/
+*.iml
+
+# 冒烟测试运行目录与报告
+smoke-run/
+smoke-report/
+*.log
+
+# Python 缓存
+__pycache__/
+*.pyc
