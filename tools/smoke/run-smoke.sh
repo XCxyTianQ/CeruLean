@@ -2,6 +2,10 @@
 # 一键：启动服务端 → 跑语义基线 → 关服 → 输出 JSON 报告
 #
 # 用法: CERULEAN_EULA=TRUE tools/smoke/run-smoke.sh <jar> [报告目录]
+#
+# 注意：paperclip 容器会把"解包后的依赖库与缓存"放在**运行目录**里（实测约 180 MB）。
+# 因此运行目录默认**复用**：删掉它会让下次启动多花 3–5 分钟（需重新解包 62 MB 原版 bundler），
+# 容易误判为"启动失败"。需要冷启动验证时自行 rm -rf 运行目录。
 set -e
 JAR=${1:?用法: run-smoke.sh <jar> [报告目录]}
 OUT=${2:-$PWD/smoke-report}
