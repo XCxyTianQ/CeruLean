@@ -68,6 +68,6 @@ public class TickRegions {
 | **06** | `RegionizedWorldData`：世界状态如何跨区域迁移（含分发链全图） | 787 | ✅ 见 [notes/06](notes/06-RegionizedWorldData-世界状态如何迁移.md) |
 | **07** | `TickRegionScheduler`：EDF/工作窃取、隐式上下文、fail-stop 失败模型 | 562 | ✅ 见 [notes/07](notes/07-TickRegionScheduler-区域如何被调度.md) |
 | **08** | `RegionizedServer`：全局 tick 与职责边界（全局 vs 区域） | 427 | ✅ 见 [notes/08](notes/08-RegionizedServer-全局tick与职责边界.md) |
-| 09 | `RegionizedTaskQueue`：跨区域任务队列与区块任务优先级 | 863 | ⏳ |
+| **09** | `RegionizedTaskQueue`：**跨区域影响的原语**（段级票据 + 队列路由 + 有界排空） | 863 | ✅ 见 [notes/09](notes/09-RegionizedTaskQueue-跨区域影响的原语.md) |
 | 10 | `scheduler/FoliaRegionScheduler` + `TeleportUtils` + `RegionShutdownThread` + util/commands | 931 | ⏳ |
 | 11 | 187 个 hook 点（按 hunk 排序，先 `ServerLevel`(62)/`MinecraftServer`(40)/`Entity`(27)/`Level`(25)） | — | ⏳ |
