@@ -61,7 +61,7 @@ public class TickRegions {
 |---|---|---|---|
 | **00** | 接入机制总览：两份补丁的分工、`TickRegions` 枢纽、启动链、类归属 | — | ✅ 见 [notes/00](notes/00-接入机制总览.md) |
 | **01** | `ThreadedRegionizer`：类型模型、设计参数、锁纪律、回调契约 | 1405（本轮读 1–275 + 1248–1405） | ✅ 见 [notes/01](notes/01-ThreadedRegionizer-类型与契约.md) |
-| 02 | `ThreadedRegionizer.addChunk/removeChunk`：分裂与合并算法 | 276–673 | ⏳ |
+| **02** | `addChunk/removeChunk/onRegionRelease`：分裂与合并算法 + 区域边界何时变 | 276–673、805–994 | ✅ 见 [notes/02](notes/02-分裂与合并算法.md) |
 | 03 | `ThreadedRegion`：区域状态机（READY/TRANSIENT/TICKING/DEAD） | 674–1022 | ⏳ |
 | 04 | `ThreadedRegionSection`：段的所有权与生命周期 | 1023–1247 | ⏳ |
 | 05 | `RegionizedData` + `RegioniserCallback`：锁外如何承载世界状态 | 235 | ⏳ |
