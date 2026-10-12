@@ -52,7 +52,8 @@ CeruLean/
 │   ├── verify/                       上游复现与漂移校验（Phase 0，已实测）
 │   ├── smoke/                        参数化 RCON 冒烟基线 + 服务器启停
 │   └── gradle-local.sh               本机 Gradle 启动器（绕开 gradlew 的 shell 问题）
-├── docs/                             00 立项与约束 · 01 pin 策略 · 02 校验手册 · 03 构建接入 · 04 Phase1 范围 · 05 命令方块语义基线
+├── docs/                             00 立项与约束 · 01 pin 策略 · 02 校验手册 · 03 构建接入 · 04 Phase1 范围 · 05 命令方块语义基线 · 06 区域化设计规格（自研）
+├── study/folia/                      Folia 源码阅读区：13+1 个还原的源文件 + 11 课阅读笔记（00–10）
 └── .github/workflows/                verify.yml（复现校验/漂移巡检）· build.yml（构建+冒烟）
 ```
 
@@ -93,5 +94,5 @@ CERULEAN_EULA=TRUE tools/smoke/run-smoke.sh <paperclip.jar> ./smoke-report
 |---|---|---|
 | Phase 0 | 基座 pin 登记、复现校验工具、三方补丁栈目录、CI | ✅ 完成（校验 `RESULT: PASS`、自测 `SELFTEST: PASS`） |
 | Phase 1 | paperweight 构建接入、参数化冒烟基线、构建 CI | ✅ **基础工作完成**（构建/校验/运行/回归四条链路均实测通过；`AzLinear v4` 移植与发布策略未做） |
-| Phase 2 | 区域化移植（入口点：Paper 26.2 stable + Folia 26.2 补丁） | ⏳ 未开始 |
+| Phase 2 | **区域化（路线已定：C = 自研，以 Folia 为参考）** · 设计规格见 [docs/06](docs/06-区域化设计规格.md) · 分期 C0–C5 | 🔄 C0 设计冻结 |
 | Phase 3 | 生产加固（多 world、崩溃恢复、watchdog/profiler、soak） | ⏳ 未开始 |
