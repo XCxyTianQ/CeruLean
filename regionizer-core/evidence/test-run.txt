@@ -1,0 +1,138 @@
+== 编译 main（-Xlint:all -Werror）
+== 编译 test
+== 运行
+CeruLean regionizer-core 测试
+
+── SectionKey 坐标换算
+   ✓ pack/unpack 往返 0,0
+   ✓ pack/unpack 往返 1,-1
+   ✓ pack/unpack 往返 -1,1
+   ✓ pack/unpack 往返 123,-456
+   ✓ pack/unpack 往返 -1,-1
+   ✓ chunkToSection(-1, shift=4)
+   ✓ chunkToSection(-16, shift=4)
+   ✓ chunkToSection(-17, shift=4)
+   ✓ sectionToChunk(-2, shift=4)
+   ✓ Chebyshev 距离
+   ✓ pack 不同段不碰撞
+
+── S1 闭式存活 / S3 removeChunk 不改拓扑 / 死段回收
+   ✓ 1 个区块 ⇒ 1 个区域
+   ✓ 1 个区块 ⇒ 5 个存活段（自身 + 四邻）
+   ✓ 区块数
+   ✓ 区域状态 READY
+   ✓ 不变量
+   ✓ 相邻段复用同一区域
+   ✓ 段数 8（两段及其四邻的并集）
+   ✓ 区块数 2
+   ✓ S3：区域 id 不变
+   ✓ S3：段集不变
+   ✓ 区块数减到 1
+   ✓ 稳定后段(0,1)仍存活（四邻有区块）
+   ✓ 存活段数
+   ✓ 不变量（稳定态）
+   ✓ 存活段集合 = 有区块的段 ∪ 其四邻
+   ✓ 全部清空后区域数 0
+   ✓ 全部清空后段数 0
+   ✓ 全部清空后区块数 0
+   ✓ 区域销毁回调被调用
+   ✓ 区域去激活回调被调用
+   ✓ 不变量（稳定态）
+
+── 桥接段：相距 2 的段经四邻段连通 / 断开后按闭式回收
+   ✓ 相距 2 的两段同属一区
+   ✓ 存活段数 9（两段四邻的并集）
+   ✓ 段(0,2)及其孤立四邻被回收
+   ✓ 存活集合回到单段闭式
+   ✓ 不变量（稳定态）
+
+── 分裂：mergeRadius=1，中间段消亡导致断开
+   ✓ 链式三段合成一区
+   ✓ 段数 13
+   ✓ 分裂为两区
+   ✓ 分裂前回调 1 次
+   ✓ 新区域创建回调 1 次
+   ✓ 分裂结果划分正确
+   ✓ 不变量（稳定态）
+   ✓ 补回后合并为一区
+   ✓ 段数回到 13
+   ✓ 不变量（稳定态）
+
+── 合并：桥接段触发 + tick 偏移换算
+   ✓ mergeRadius=1 时距离 4 各自成区
+   ✓ 两个不同区域
+   ✓ 桥接后合并为一区
+   ✓ 段数 13
+   ✓ 合并前回调被调用
+   ✓ 合并 tick 偏移 = |10-4|
+   ✓ 被吸收区域的数据已清空
+   ✓ 不变量（稳定态）
+
+── TICKING 不可变（I2 / S4）与释放点收敛
+   ✓ READY 区域可进入 TICKING
+   ✓ 状态 TICKING
+   ✓ 重复 tryMarkTicking 失败
+   ✓ 不得挂入 TICKING 区域，必须新建
+   ✓ TICKING 区域段集不变（I2）
+   ✓ 不变量（含 I2 快照校验）
+   ✓ 同段追加区块不影响段集
+   ✓ 区块计数增加
+   ✓ 不变量（含 I2 快照校验）
+   ✓ 释放点返回 true
+   ✓ 释放后收敛为一区
+   ✓ 收敛后段数 9
+   ✓ 对非 TICKING 区域释放返回 false
+   ✓ 不变量（稳定态）
+
+── 状态迁移契约（docs/06 §7）
+   ✓ 迁移前条目数
+   ✓ 分裂为两区
+   ✓ 留在原区域的条目
+   ✓ 迁到新区域的条目
+   ✓ 不变量（稳定态）
+   ✓ 合并后条目数（段(0,2)消亡时其条目已按契约丢弃）
+   ✓ 合并后区域数
+   ✓ 不变量（稳定态）
+
+── 模型检验：随机操作序列 vs 朴素参考实现
+   ✓ shift=4 mergeRadius=1 seed=1 (150 步随机操作)
+   ✓ shift=4 mergeRadius=1 seed=7 (150 步随机操作)
+   ✓ shift=4 mergeRadius=1 seed=42 (150 步随机操作)
+   ✓ shift=4 mergeRadius=1 seed=2026 (150 步随机操作)
+   ✓ shift=4 mergeRadius=1 seed=99991 (150 步随机操作)
+   ✓ shift=4 mergeRadius=1 seed=123456789 (150 步随机操作)
+   ✓ shift=4 mergeRadius=2 seed=1 (150 步随机操作)
+   ✓ shift=4 mergeRadius=2 seed=7 (150 步随机操作)
+   ✓ shift=4 mergeRadius=2 seed=42 (150 步随机操作)
+   ✓ shift=4 mergeRadius=2 seed=2026 (150 步随机操作)
+   ✓ shift=4 mergeRadius=2 seed=99991 (150 步随机操作)
+   ✓ shift=4 mergeRadius=2 seed=123456789 (150 步随机操作)
+   ✓ shift=4 mergeRadius=3 seed=1 (150 步随机操作)
+   ✓ shift=4 mergeRadius=3 seed=7 (150 步随机操作)
+   ✓ shift=4 mergeRadius=3 seed=42 (150 步随机操作)
+   ✓ shift=4 mergeRadius=3 seed=2026 (150 步随机操作)
+   ✓ shift=4 mergeRadius=3 seed=99991 (150 步随机操作)
+   ✓ shift=4 mergeRadius=3 seed=123456789 (150 步随机操作)
+   ✓ shift=2 mergeRadius=1 seed=1 (150 步随机操作)
+   ✓ shift=2 mergeRadius=1 seed=7 (150 步随机操作)
+   ✓ shift=2 mergeRadius=1 seed=42 (150 步随机操作)
+   ✓ shift=2 mergeRadius=1 seed=2026 (150 步随机操作)
+   ✓ shift=2 mergeRadius=1 seed=99991 (150 步随机操作)
+   ✓ shift=2 mergeRadius=1 seed=123456789 (150 步随机操作)
+   ✓ shift=2 mergeRadius=2 seed=1 (150 步随机操作)
+   ✓ shift=2 mergeRadius=2 seed=7 (150 步随机操作)
+   ✓ shift=2 mergeRadius=2 seed=42 (150 步随机操作)
+   ✓ shift=2 mergeRadius=2 seed=2026 (150 步随机操作)
+   ✓ shift=2 mergeRadius=2 seed=99991 (150 步随机操作)
+   ✓ shift=2 mergeRadius=2 seed=123456789 (150 步随机操作)
+   ✓ shift=2 mergeRadius=3 seed=1 (150 步随机操作)
+   ✓ shift=2 mergeRadius=3 seed=7 (150 步随机操作)
+   ✓ shift=2 mergeRadius=3 seed=42 (150 步随机操作)
+   ✓ shift=2 mergeRadius=3 seed=2026 (150 步随机操作)
+   ✓ shift=2 mergeRadius=3 seed=99991 (150 步随机操作)
+   ✓ shift=2 mergeRadius=3 seed=123456789 (150 步随机操作)
+
+════════════════════════════════════════
+  通过 113 / 失败 0
+════════════════════════════════════════
+退出码=0
