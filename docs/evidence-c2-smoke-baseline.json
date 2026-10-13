@@ -14,7 +14,7 @@
     {
       "case": "version",
       "status": "PASS",
-      "detail": "§fThis server is running CeruLean version 26.3-DEV-main@dcccdf5 (1970-01-01T00:00:00Z) (Im"
+      "detail": "§fThis server is running CeruLean version 26.3-DEV-main@9ce8f20 (1970-01-01T00:00:00Z) (Im"
     },
     {
       "case": "setblock_data_nbt",
@@ -64,7 +64,7 @@
     {
       "case": "tps_health(OBSERVED)",
       "status": "OBSERVED",
-      "detail": "§6TPS from last 1m, 5m, 15m: §a20.0§r, §a20.0§r, §a20.0"
+      "detail": "§6TPS from last 1m, 5m, 15m: §a19.9§r, §a19.9§r, §a19.9"
     },
     {
       "case": "save_all_flush(OBSERVED)",

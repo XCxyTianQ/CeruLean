@@ -1,3 +1,12 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Mon, 13 Oct 2026 00:00:00 +0800
+Subject: [PATCH] CeruLean region topology wiring (C2)
+
+---
+把区域拓扑接进真实服务端：区块 holder 生命周期 → 区域化器；
+ServerLevel 持有区域化器并在 tick 末尾驱动串行拓扑 tick；注册 /cerulean 诊断命令。
+---
 diff --git a/ca/spottedleaf/moonrise/paper/util/BaseChunkSystemHooks.java b/ca/spottedleaf/moonrise/paper/util/BaseChunkSystemHooks.java
 index 4baf462..7543de4 100644
 --- a/ca/spottedleaf/moonrise/paper/util/BaseChunkSystemHooks.java
