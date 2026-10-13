@@ -27,13 +27,38 @@ import net.minecraft.server.level.ServerLevel;
  */
 public final class CeruLeanRegions {
 
+    /** 有效参数（由 {@code config/paper-global.yml} 的 cerulean-regions 节驱动；见 {@link #init}）。 */
+    private static volatile RegionizerConfig config = RegionizerConfig.defaults();
+
+    public static RegionizerConfig config() {
+        return config;
+    }
+
     /**
-     * 服务端配置：16×16 区块的段（= 上游 gridExponent 4）、**3×3 方形邻居**（= 上游
-     * {@code emptySectionCreateRadius=1}）、**合并半径 2 段 = 32 区块**（上游 {@code regionSectionMergeRadius=1}，我们更保守）。
-     *
-     * <p>取值来自上游 Folia 26.2 补丁里 {@code ServerLevel} 的构造实参；C3 会把它做成服务端可配置项。</p>
+     * 由配置加载流程调用（{@code CeruLeanGlobalConfig} 的 {@code @PostProcess}）。
+     * 做校验/夹取并打印生效值——配置错在这里就应该看得见，而不是等运行期行为诡异。
      */
-    public static final RegionizerConfig CONFIG = RegionizerConfig.defaults();
+    public static void init(final CeruLeanGlobalConfig cfg) {
+        final int shift = Math.max(0, Math.min(16, cfg.gridExponent));
+        final int mergeRadius = Math.max(1, Math.min(8, cfg.mergeRadius));
+        io.cerulean.regionizer.Neighbourhood nb;
+        try {
+            nb = io.cerulean.regionizer.Neighbourhood.valueOf(cfg.neighbourhood.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (final IllegalArgumentException ex) {
+            nb = io.cerulean.regionizer.Neighbourhood.SQUARE_3X3;
+            LOGGER.warn("未知的 cerulean-regions.neighbourhood='{}'，回退为 {}",
+                    cfg.neighbourhood, nb);
+        }
+        if (shift != cfg.gridExponent || mergeRadius != cfg.mergeRadius) {
+            LOGGER.warn("cerulean-regions 参数超出允许范围，已夹取：gridExponent {}→{}，mergeRadius {}→{}",
+                    cfg.gridExponent, shift, cfg.mergeRadius, mergeRadius);
+        }
+        config = new RegionizerConfig(shift, mergeRadius, cfg.trackTickingSections, nb);
+        LOGGER.info("CeruLean 区域化参数生效：{}（段 {} 区块；邻居 {} 个）",
+                config, 1 << shift, nb.count());
+    }
+
+    private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
 
     private final ServerLevel level;
     private final Regionizer<RegionData> regionizer;
@@ -41,7 +66,7 @@ public final class CeruLeanRegions {
 
     public CeruLeanRegions(final ServerLevel level) {
         this.level = level;
-        this.regionizer = new Regionizer<>(CONFIG, RegionData::new, this.counters);
+        this.regionizer = new Regionizer<>(config(), RegionData::new, this.counters);
     }
 
     public ServerLevel level() {

@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Mon, 13 Oct 2026 00:00:00 +0800
+Subject: [PATCH] CeruLean region topology config section
+
+---
+在 config/paper-global.yml 增加 cerulean-regions 节（段大小 / 合并半径 / 邻居语义 / I2 快照），
+由 CeruLeanGlobalConfig 的 @PostProcess 在配置加载后推给区域化内核（照上游 Folia 的做法）。
+---
+diff --git a/paper-server/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java b/paper-server/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
+index 0b35a29..8af37ba 100644
+--- a/paper-server/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
++++ b/paper-server/src/main/java/io/papermc/paper/configuration/GlobalConfiguration.java
+@@ -37,6 +37,11 @@ public class GlobalConfiguration extends ConfigurationPart {
+ 
+     public ChunkLoadingBasic chunkLoadingBasic;
+ 
++    // CeruLean start - region topology parameters
++    @Comment("CeruLean 区域化拓扑参数：段大小、合并半径、邻居语义（详见 docs/09）")
++    public io.cerulean.regions.CeruLeanGlobalConfig ceruleanRegions;
++    // CeruLean end - region topology parameters
++
+     public class ChunkLoadingBasic extends ConfigurationPart {
+         @Comment("The maximum rate in chunks per second that the server will send to any individual player. Set to -1 to disable this limit.")
+         public double playerMaxChunkSendRate = 75.0;

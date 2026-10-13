@@ -20,6 +20,7 @@ build
 # 冒烟测试运行目录与报告
 smoke-run/
 smoke-report/
+smoke-config-report/
 *.log
 
 # Python 缓存

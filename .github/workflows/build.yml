@@ -72,10 +72,22 @@ jobs:
           # 而全流程无人检查该变量，导致 CI 假绿）
           tools/smoke/run-smoke.sh "${{ steps.artifact.outputs.jar }}" ./smoke-report
 
+      - name: 配置验收（cerulean-regions 是否真的驱动内核）
+        env:
+          CERULEAN_EULA: "TRUE"
+          CERULEAN_EXPECT_MC: "26.3"
+        run: |
+          # 跑两轮：默认 merge-radius=2，再改成 1，比较实测的合并阈值（必须左移 1 段）。
+          # 这是"配置被忽略"这类问题的唯一可靠检出方式。
+          chmod +x tools/smoke/*.sh
+          tools/smoke/c3-config-acceptance.sh "${{ steps.artifact.outputs.jar }}" ./smoke-config-report
+
       - name: 上传冒烟报告
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-report
-          path: smoke-report/
+          path: |
+            smoke-report/
+            smoke-config-report/
           if-no-files-found: warn

@@ -46,7 +46,12 @@ public final class CeruLeanCommand {
     }
 
     private static int listRegions(final CommandContext<CommandSourceStack> context) {
-        final StringBuilder out = new StringBuilder("CeruLean 区域拓扑");
+        final io.cerulean.regionizer.RegionizerConfig cfg = CeruLeanRegions.config();
+        final StringBuilder out = new StringBuilder("CeruLean 区域拓扑")
+            .append("（段位移 ").append(cfg.regionShift)
+            .append(" / 段=").append(1 << cfg.regionShift).append(" 区块")
+            .append(" / 合并半径 ").append(cfg.mergeRadius).append(" 段")
+            .append(" / 邻居 ").append(cfg.neighbourhood).append('）');
         for (final ServerLevel level : MinecraftServer.getServer().getAllLevels()) {
             out.append('\n').append("  ").append(level.ceruleanRegions.summary());
             for (final String line : level.ceruleanRegions.detail(5)) {
