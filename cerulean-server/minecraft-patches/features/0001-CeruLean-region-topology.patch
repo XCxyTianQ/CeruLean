@@ -68,3 +68,11 @@ index 8389d81..daa2a08 100644
      }
  
      @Override
+@@ -2941,4 +2946,7 @@
+     public void close() throws IOException {
++        // CeruLean start - region scheduler shutdown（B1：EDF 模式要停掉区域线程池）
++        this.ceruleanRegions.shutdown();
++        // CeruLean end - region scheduler shutdown
+         super.close();
+         //this.entityManager.close(); // Paper - rewrite chunk system
+     }

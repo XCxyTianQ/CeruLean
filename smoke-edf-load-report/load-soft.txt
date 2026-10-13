@@ -1,0 +1,5 @@
+== B2 压载观测（ownership-check = soft）
+  压载后拓扑: minecraft:overworld: 区域 1 / 段 23（存活 23）/ 区块 822 / 最大区域 #9(23 段) /   串行调度：轮 396 / 区域 tick 1331 次
+  归属校验: off（与 Paper 行为一致；开启方式见 cerulean-regions.ownership-check）
+
+MODE=soft VIOLATIONS=0 SITES=0 LOAD_SECONDS=22.1 SURVIVED=1

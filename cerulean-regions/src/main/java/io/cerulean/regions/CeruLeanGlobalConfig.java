@@ -40,6 +40,15 @@ public class CeruLeanGlobalConfig extends ConfigurationPart {
     )
     public String ownershipCheck = "off";
 
+    @Comment(
+        "区域调度模式（B1）：serial = 主线程按区域 id 升序确定性 tick（默认，便于与 C2 对拍）；\n"
+        + "edf = 用并发库的 EDFSchedulerThreadPool 让区域在自己的线程上 tick（与上游同一套调度器）。"
+    )
+    public String scheduler = "serial";
+
+    @Comment("edf 模式的区域 tick 线程数；-1/0 = 按上游公式自动（cores/2，≤4 取 1，否则再 /4）。")
+    public int threads = -1;
+
     @PostProcess
     private void postProcess() {
         CeruLeanRegions.init(this);

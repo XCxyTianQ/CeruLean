@@ -96,6 +96,7 @@ public final class CeruLeanCommand {
             .append(" / 邻居 ").append(cfg.neighbourhood).append('）');
         for (final ServerLevel level : MinecraftServer.getServer().getAllLevels()) {
             out.append('\n').append("  ").append(level.ceruleanRegions.summary());
+            out.append('\n').append("  ").append(level.ceruleanRegions.scheduler().summary());
             for (final String line : level.ceruleanRegions.detail(5)) {
                 out.append('\n').append("  ").append(line);
             }

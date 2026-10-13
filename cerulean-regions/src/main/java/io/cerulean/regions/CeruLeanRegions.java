@@ -64,19 +64,54 @@ public final class CeruLeanRegions {
             LOGGER.warn("未知的 cerulean-regions.ownership-check='{}'，回退为 off", cfg.ownershipCheck);
         }
         CeruLeanOwnership.init(ownership);
+        SCHEDULER_MODE = "edf".equalsIgnoreCase(cfg.scheduler.trim()) ? "edf" : "serial";
+        SCHEDULER_THREADS = cfg.threads;
+        LOGGER.info("CeruLean 调度模式：{}（线程数 {}）", SCHEDULER_MODE,
+                "edf".equals(SCHEDULER_MODE) ? String.valueOf(schedulerThreads()) : "串行/主线程");
         LOGGER.info("CeruLean 区域化参数生效：{}（段 {} 区块；邻居 {} 个）",
                 config, 1 << shift, nb.count());
     }
 
     private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
 
+    static void logWarn(final String message) {
+        LOGGER.warn(message);
+    }
+
+    /** 调度模式（配置项 cerulean-regions.scheduler；默认 serial）。 */
+    public static String schedulerMode() {
+        return SCHEDULER_MODE;
+    }
+
+    /** 区域 tick 线程数（EDF 模式用；-1/0 表示按上游公式自动）。 */
+    public static int schedulerThreads() {
+        final int configured = SCHEDULER_THREADS;
+        if (configured > 0) {
+            return configured;
+        }
+        // 上游公式：cores/2；若 ≤4 则取 1，否则再 /4（工程研究 notes/12 §2.1）
+        int threads = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+        threads = threads <= 4 ? 1 : threads / 4;
+        return Math.max(1, threads);
+    }
+
+    private static volatile String SCHEDULER_MODE = "serial";
+    private static volatile int SCHEDULER_THREADS = -1;
+
     private final ServerLevel level;
     private final Regionizer<RegionData> regionizer;
     private final Counters counters = new Counters();
+    /** B1：区域调度器（serial = 确定性对拍基线；edf = 用并发库的区域线程池）。 */
+    private final RegionTickScheduler scheduler;
 
     public CeruLeanRegions(final ServerLevel level) {
         this.level = level;
         this.regionizer = new Regionizer<>(config(), RegionData::new, this.counters);
+        this.counters.owner = this;
+        this.scheduler = "edf".equals(schedulerMode())
+                ? new EdfRegionTickScheduler(this, schedulerThreads())
+                : new SerialRegionTickScheduler(this);
+        this.scheduler.start();
     }
 
     public ServerLevel level() {
@@ -107,25 +142,16 @@ public final class CeruLeanRegions {
      * <p>C2 阶段世界内容仍由 Paper 原样 tick；这里只驱动拓扑本身，因此<b>不改变任何原版行为</b>。</p>
      */
     public void tickTopology() {
-        final List<Region<RegionData>> snapshot = this.regionizer.regionsSnapshot();
-        if (snapshot.isEmpty()) {
-            return;
-        }
-        final long gameTime = this.level.getServer().getTickCount();
-        for (final Region<RegionData> region : snapshot) {
-            // 绑定"谁在 tick"：C2 里就是调用本方法的线程（主线程）。B2 的归属校验读它。
-            if (!this.regionizer.tryMarkTicking(region, Thread.currentThread().threadId())) {
-                continue;                       // 已被并发吞并/销毁，或正忙
-            }
-            final RegionData data = region.data();
-            if (data != null) {
-                if (data.firstTickGameTime < 0L) {
-                    data.firstTickGameTime = gameTime;
-                }
-                data.ticks++;
-            }
-            this.regionizer.markNotTicking(region);
-        }
+        this.scheduler.driveMainThread();
+    }
+
+    /** 关服/世界卸载时停止调度（EDF 会 halt + join 线程池）。 */
+    public void shutdown() {
+        this.scheduler.shutdown();
+    }
+
+    public RegionTickScheduler scheduler() {
+        return this.scheduler;
     }
 
     /** 供诊断命令与日志使用的一行摘要。 */
@@ -169,6 +195,9 @@ public final class CeruLeanRegions {
     /** 区域生命周期回调：只做计数，不触碰世界状态（区块系统线程会调用）。 */
     public static final class Counters implements RegionizerCallbacks<RegionData> {
 
+        /** 反向引用：回调里需要把"区域激活/销毁"通知给调度器。构造后由 CeruLeanRegions 设置。 */
+        private CeruLeanRegions owner;
+
         public volatile long created;
         public volatile long active;
         public volatile long deactivated;
@@ -185,11 +214,21 @@ public final class CeruLeanRegions {
         @Override
         public void onRegionActive(final Region<RegionData> region) {
             this.active++;
+            // B1：EDF 模式下区域激活即注册调度（上游同做法）。注意我们此刻在区域化器**写锁内**，
+            // 因此这里只允许做"入队"这种不回调区域化器的动作（锁序：Regionizer.lock → 调度器锁）。
+            final CeruLeanRegions owner = this.owner;
+            if (owner != null && owner.scheduler() instanceof EdfRegionTickScheduler edf) {
+                edf.onRegionActive(region);
+            }
         }
 
         @Override
         public void onRegionDeactivate(final Region<RegionData> region) {
             this.deactivated++;
+            final CeruLeanRegions owner = this.owner;
+            if (owner != null && owner.scheduler() instanceof EdfRegionTickScheduler edf) {
+                edf.onRegionDeactivate(region);
+            }
         }
 
         @Override

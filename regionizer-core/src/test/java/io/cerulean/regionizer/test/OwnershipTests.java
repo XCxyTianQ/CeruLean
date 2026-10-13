@@ -46,7 +46,46 @@ public final class OwnershipTests {
                         + " cur=" + cur + " owner=" + owner));
     }
 
+    /** B1 的时间学用例：catch-up、防饿死、回绕安全、跨区域折算。 */
+    private static void scheduleTests(final T t) {
+        final io.cerulean.regionizer.TickSchedule s = new io.cerulean.regionizer.TickSchedule();
+        final long period = io.cerulean.regionizer.TickSchedule.PERIOD_NS;
+        final long t0 = 1_000_000_000L;
+        t.group("B1 区域 tick 时间学（catch-up / 防饿死 / 回绕 / 跨区域折算）");
+        s.setFirstStart(t0 + period);
+        t.eq("首次 deadline", t0 + period, s.deadline(period));
+
+        // 准点：补 1 个 tick，下一次保持相位（先 advance 再 max）
+        t.eq("准点 ⇒ 补 1 个 tick", 1, s.tickCount(t0 + period));
+        final long onTimeEnd = t0 + period + 2_000_000L;
+        t.eq("准点 ⇒ 下一次起点保持相位", t0 + 2 * period, s.completeTick(1, onTimeEnd));
+
+        // 落后：此刻 lastPeriod = t0 + period，now = t0 + 4·period ⇒ 过了 3 个周期 ⇒ 补 3 个 tick
+        // （上游按"相对 lastPeriod 过了几个周期"计，不是按"比 deadline 迟了多少"计）
+        final long late = t0 + 4 * period;
+        final int catchUp = s.tickCount(late);
+        t.eq("过了 3 个周期 ⇒ 补 3 个 tick", 3, catchUp);
+        t.eq("补课后下一次起点保持相位", t0 + 5 * period, s.completeTick(catchUp, late + 2_000_000L));
+
+        // 超时（本次 tick 比理想起点晚了 80 ms）：下一次起点 = 实际结束时刻（不追相位）
+        final long slowEnd = t0 + 5 * period + 80_000_000L;
+        t.eq("超时 ⇒ 下一次起点 = 实际结束时刻", slowEnd, s.completeTick(1, slowEnd));
+        t.eq("超时后相位以实际结束时刻重设", slowEnd, s.deadline(period));
+
+        // 回绕安全（纳秒回绕时裸比较会翻转）
+        t.eq("回绕安全比较 earlierThan", true,
+                io.cerulean.regionizer.TickSchedule.earlierThan(Long.MAX_VALUE - 5L, Long.MIN_VALUE + 5L));
+        t.eq("回绕安全取大 greatest", Long.MIN_VALUE + 5L,
+                io.cerulean.regionizer.TickSchedule.greatest(Long.MAX_VALUE - 5L, Long.MIN_VALUE + 5L));
+
+        // 跨区域折算：A 的绝对 deadline → B 的 tick 基准
+        final long aDeadline = 10_000_000_000L;
+        t.eq("跨区域折算 deadline（tick 差 ×2）", aDeadline + 2 * period,
+                io.cerulean.regionizer.TickSchedule.transferDeadline(aDeadline, 100L, 102L));
+    }
+
     public static void run(final T t) {
+        scheduleTests(t);
         t.group("B2 归属判定（谁拥有这个位置）");
         final Regionizer<Bag> r = fresh();
         r.addChunk(0, 0);                       // 段 0
