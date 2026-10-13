@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Mon, 13 Oct 2026 00:00:00 +0800
+Subject: [PATCH] CeruLean region topology diagnostics command (/cerulean)
+
+---
+通过 Paper 的命令 API 注册 /cerulean，而不是往 vanilla 调度器根节点加命令：
+Paper 的 MinecraftCommandPermissionsTest 校验根命令与 minecraft.command.* 权限一一对应，
+上游自己的内部命令（/version、/plugins）也走 API 注册。
+---
+diff --git a/paper-server/src/main/java/io/papermc/paper/command/PaperCommands.java b/paper-server/src/main/java/io/papermc/paper/command/PaperCommands.java
+index e81dcd8..b33068c 100644
+--- a/paper-server/src/main/java/io/papermc/paper/command/PaperCommands.java
++++ b/paper-server/src/main/java/io/papermc/paper/command/PaperCommands.java
+@@ -34,6 +34,12 @@ public final class PaperCommands {
+         registerInternalCommand(PaperMSPTCommand.create(), "paper", PaperMSPTCommand.DESCRIPTION, List.of(), Set.of());
+         registerInternalCommand(PaperVersionCommand.create(), "bukkit", PaperVersionCommand.DESCRIPTION, List.of("ver", "about"), Set.of());
+         registerInternalCommand(PaperPluginsCommand.create(), "bukkit", PaperPluginsCommand.DESCRIPTION, List.of("pl"), Set.of());
++        // CeruLean start - region topology diagnostics
++        io.papermc.paper.command.brigadier.PaperCommands.INSTANCE.registerWithFlagsInternal(
++            null, "cerulean", "CeruLean", io.cerulean.regions.CeruLeanCommand.create(),
++            io.cerulean.regions.CeruLeanCommand.DESCRIPTION, List.of(), Set.of()
++        );
++        // CeruLean end - region topology diagnostics
+     }
+ 
+     private static void registerInternalCommand(final LiteralCommandNode<CommandSourceStack> node, final String namespace, final String description, final List<String> aliases, final Set<CommandRegistrationFlag> flags) {

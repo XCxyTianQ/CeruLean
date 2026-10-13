@@ -14,7 +14,7 @@
     {
       "case": "version",
       "status": "PASS",
-      "detail": "§fThis server is running CeruLean version 26.3-DEV-main@9ce8f20 (1970-01-01T00:00:00Z) (Im"
+      "detail": "§fThis server is running CeruLean version 26.3-DEV-main@897e146 (1970-01-01T00:00:00Z) (Im"
     },
     {
       "case": "setblock_data_nbt",

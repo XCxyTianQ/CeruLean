@@ -30,20 +30,6 @@ index 4baf462..7543de4 100644
      }
  
      @Override
-diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
-index d9acbf6..725e03e 100644
---- a/net/minecraft/commands/Commands.java
-+++ b/net/minecraft/commands/Commands.java
-@@ -213,6 +213,9 @@ public class Commands {
-         DifficultyCommand.register(this.dispatcher);
-         EffectCommands.register(this.dispatcher, context);
-         EmoteCommands.register(this.dispatcher);
-+        // CeruLean start - region topology diagnostics
-+        io.cerulean.regions.CeruLeanCommand.register(this.dispatcher);
-+        // CeruLean end - region topology diagnostics
-         EnchantCommand.register(this.dispatcher, context);
-         ExperienceCommand.register(this.dispatcher);
-         FillCommand.register(this.dispatcher, context);
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
 index 8389d81..daa2a08 100644
 --- a/net/minecraft/server/level/ServerLevel.java
