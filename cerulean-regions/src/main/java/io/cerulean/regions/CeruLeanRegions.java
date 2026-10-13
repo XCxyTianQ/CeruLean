@@ -78,6 +78,24 @@ public final class CeruLeanRegions {
         LOGGER.warn(message);
     }
 
+    /** 自检开关：让下一次区域 tick 故意抛异常，用来验证 fail-stop 真的会停服。 */
+    private static final java.util.concurrent.atomic.AtomicBoolean THROW_IN_TICK =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** 武装自检（消费一次）。 */
+    public static void armThrowInTick() {
+        THROW_IN_TICK.set(true);
+    }
+
+    /** 取用自检开关（消费一次；返回 true 表示"本次 tick 应当抛异常"）。 */
+    public static boolean consumeThrowInTick() {
+        return THROW_IN_TICK.compareAndSet(true, false);
+    }
+
+    static void logError(final String message, final Throwable throwable) {
+        LOGGER.error(message, throwable);
+    }
+
     /** 调度模式（配置项 cerulean-regions.scheduler；默认 serial）。 */
     public static String schedulerMode() {
         return SCHEDULER_MODE;
@@ -148,6 +166,14 @@ public final class CeruLeanRegions {
     /** 关服/世界卸载时停止调度（EDF 会 halt + join 线程池）。 */
     public void shutdown() {
         this.scheduler.shutdown();
+    }
+
+    /**
+     * fail-stop：**只**停掉调度、不等线程（因为我们可能正跑在调度线程上，join 会自锁）。
+     * 供 {@link RegionTickSchedulerSupport} 在区域 tick 抛异常时调用。
+     */
+    public void haltScheduler() {
+        this.scheduler.haltOnly();
     }
 
     public RegionTickScheduler scheduler() {

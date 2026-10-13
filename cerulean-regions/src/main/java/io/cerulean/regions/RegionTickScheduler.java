@@ -27,6 +27,9 @@ public interface RegionTickScheduler {
     /** 关服/卸载世界时停止（EDF 会 halt + join）。 */
     void shutdown();
 
+    /** fail-stop：只置停、不等线程（可能在调度线程上调用，join 会自锁）。 */
+    void haltOnly();
+
     /** 供诊断命令使用的一行摘要。 */
     String summary();
 

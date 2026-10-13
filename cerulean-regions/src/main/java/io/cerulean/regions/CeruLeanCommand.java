@@ -36,6 +36,14 @@ public final class CeruLeanCommand {
     public static LiteralCommandNode<CommandSourceStack> create() {
         return Commands.literal("cerulean")
             .requires(source -> source.getSender().hasPermission(PERMISSION))
+            .then(Commands.literal("selftest")
+                .then(Commands.literal("throw-in-tick")
+                    .executes(context -> {
+                        CeruLeanRegions.armThrowInTick();
+                        context.getSource().getSender().sendMessage(Component.text(
+                                "已武装：下一次区域 tick 将故意抛异常（用于验证 fail-stop 会停服）"));
+                        return 1;
+                    })))
             .then(Commands.literal("ownership")
                 .executes(CeruLeanCommand::ownershipSummary)
                 .then(Commands.literal("verify")

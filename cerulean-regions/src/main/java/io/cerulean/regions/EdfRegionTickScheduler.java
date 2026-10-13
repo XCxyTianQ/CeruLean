@@ -87,6 +87,11 @@ public final class EdfRegionTickScheduler implements RegionTickScheduler {
     }
 
     @Override
+    public void haltOnly() {
+        this.pool.halt();          // 只置停 + unpark，绝不 join（可能在池线程上调用）
+    }
+
+    @Override
     public void shutdown() {
         this.pool.halt();
         if (!this.pool.join(5000L)) {

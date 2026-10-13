@@ -58,6 +58,11 @@ public final class SerialRegionTickScheduler implements RegionTickScheduler {
     }
 
     @Override
+    public void haltOnly() {
+        // 无自有线程
+    }
+
+    @Override
     public String summary() {
         return String.format("串行调度：轮 %d / 区域 tick %d 次", this.rounds, this.ticks);
     }
