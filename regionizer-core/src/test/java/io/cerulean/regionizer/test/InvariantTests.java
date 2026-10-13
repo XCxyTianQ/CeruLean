@@ -53,7 +53,7 @@ public final class InvariantTests {
     }
 
     static Regionizer<Bag> fresh(final int shift, final int mergeRadius, final Bag.Callbacks cb) {
-        return new Regionizer<>(new RegionizerConfig(shift, mergeRadius), Bag::new, cb);
+        return new Regionizer<>(new RegionizerConfig(shift, mergeRadius, true), Bag::new, cb);
     }
 
     public static void sectionKey(final T t) {

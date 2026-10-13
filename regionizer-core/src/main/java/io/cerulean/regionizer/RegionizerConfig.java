@@ -24,7 +24,19 @@ public final class RegionizerConfig {
      */
     public final int mergeRadius;
 
+    /**
+     * 是否在进入 TICKING 时复制一份段 key 快照（用于校验不变量 I2）。
+     *
+     * <p><b>默认关闭</b>：快照是 O(段数) 的分配，实测在大区域上是每次释放的主要成本
+     * （2496 段 ≈ 500 µs）。测试与不变量巡检把它打开，生产路径保持关闭。</p>
+     */
+    public final boolean trackTickingSections;
+
     public RegionizerConfig(final int regionShift, final int mergeRadius) {
+        this(regionShift, mergeRadius, false);
+    }
+
+    public RegionizerConfig(final int regionShift, final int mergeRadius, final boolean trackTickingSections) {
         if (regionShift < 0 || regionShift > 16) {
             throw new IllegalArgumentException("regionShift 越界: " + regionShift);
         }
@@ -33,6 +45,7 @@ public final class RegionizerConfig {
         }
         this.regionShift = regionShift;
         this.mergeRadius = mergeRadius;
+        this.trackTickingSections = trackTickingSections;
     }
 
     /** 默认：16×16 区块的段、合并半径 2。 */
@@ -41,15 +54,21 @@ public final class RegionizerConfig {
     }
 
     public RegionizerConfig withMergeRadius(final int mergeRadius) {
-        return new RegionizerConfig(this.regionShift, mergeRadius);
+        return new RegionizerConfig(this.regionShift, mergeRadius, this.trackTickingSections);
     }
 
     public RegionizerConfig withShift(final int regionShift) {
-        return new RegionizerConfig(regionShift, this.mergeRadius);
+        return new RegionizerConfig(regionShift, this.mergeRadius, this.trackTickingSections);
+    }
+
+    /** 打开 I2 快照（测试/巡检用）。 */
+    public RegionizerConfig withTickingSnapshot() {
+        return new RegionizerConfig(this.regionShift, this.mergeRadius, true);
     }
 
     @Override
     public String toString() {
-        return "Config{shift=" + this.regionShift + ", mergeRadius=" + this.mergeRadius + '}';
+        return "Config{shift=" + this.regionShift + ", mergeRadius=" + this.mergeRadius
+                + ", tickingSnapshot=" + this.trackTickingSections + '}';
     }
 }

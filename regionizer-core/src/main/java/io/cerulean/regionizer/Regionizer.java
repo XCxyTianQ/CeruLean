@@ -90,10 +90,16 @@ public final class Regionizer<D> {
             final boolean becameEmpty = --section.chunkCount == 0;
             --this.chunkCount;
             if (becameEmpty) {
+                if (section.nonEmptyNeighbours == 0 && section.region != null) {
+                    section.region.markDead(section);       // 自己变死
+                }
                 for (final int[] d : CARDINALS) {
                     final Section<D> n = this.sections.get(SectionKey.pack(section.x + d[0], section.z + d[1]));
                     if (n != null) {
                         n.nonEmptyNeighbours--;
+                        if (n.chunkCount == 0 && n.nonEmptyNeighbours == 0 && n.region != null) {
+                            n.region.markDead(n);           // 邻居因我而变死
+                        }
                     }
                 }
             }
@@ -137,9 +143,12 @@ public final class Regionizer<D> {
                 return false;
             }
             region.state = RegionState.TICKING;
-            region.tickingSections = new HashSet<>();
-            for (final Section<D> s : region.sections) {
-                region.tickingSections.add(s.key);
+            if (this.config.trackTickingSections) {      // 生产默认关闭：这是 O(段数) 的分配
+                final HashSet<Long> snapshot = new HashSet<>();
+                for (final Section<D> s : region.sections) {
+                    snapshot.add(s.key);
+                }
+                region.tickingSections = snapshot;
             }
             return true;
         } finally {
@@ -258,12 +267,18 @@ public final class Regionizer<D> {
             for (final int[] d : CARDINALS) {
                 final Section<D> n = this.sections.get(SectionKey.pack(sx + d[0], sz + d[1]));
                 if (n != null) {
+                    if (n.chunkCount == 0 && n.nonEmptyNeighbours == 0 && n.region != null) {
+                        n.region.markAlive(n);      // 原本是死段，现在靠邻居复活
+                    }
                     n.nonEmptyNeighbours++;
                 }
             }
         }
         section.chunkCount++;
         this.chunkCount++;
+        if (section.region != null) {
+            section.region.markAlive(section);
+        }
 
         if (section.region == null) {
             this.attachLocked(section);
@@ -286,12 +301,14 @@ public final class Regionizer<D> {
             }
             if (neighbour.region == null && neighbour.isAlive()) {
                 this.attachLocked(neighbour);
+            } else if (neighbour.region != null) {
+                this.seedLocked(neighbour.region, neighbour);
             }
         }
         return section.region;
     }
 
-    /** 把新段挂到某个区域：优先挂到"非 TICKING 且距离最近"的邻居区域，否则新建区域。 */
+    /** 把新段挂到某个区域：优先挂到"非 TICKING"的邻居区域，否则新建区域。 */
     private void attachLocked(final Section<D> section) {
         final LinkedHashSet<Region<D>> candidates = new LinkedHashSet<>();
         this.forEachInRadius(section.x, section.z, this.config.mergeRadius, s -> {
@@ -319,36 +336,80 @@ public final class Regionizer<D> {
             this.callbacks.onRegionActive(target);
         }
 
-        // 立即吸收其它可合并的邻居区域（含传递相邻）；剩下的（正在 TICKING 的）等它们释放时收敛。
-        this.convergeLocked(target);
+        // 性能关键：只扫【新段邻域】即可判断能否立即吸收别的区域；
+        // 不能立即吸收的（例如对方正在 TICKING）登记到种子里，留给释放点。
+        this.seedLocked(target, section);
         this.updateStateLocked(target);
     }
 
-    // ────────────────────────────── 内部：释放点 ──────────────────────────────
+    /** 登记一个"可能产生跨区域邻接"的种子段；若邻域内有可吸收的区域则立即吸收。 */
+    private void seedLocked(final Region<D> region, final Section<D> seed) {
+        if (region.state == RegionState.TICKING) {
+            // S4/I2：TICKING 区域的段集不可变 ⇒ 只登记提示（不吸收、不合并），
+            // 等它释放时再收敛。登记种子本身不改段集，是允许的。
+            region.convergenceSeeds.add(seed.key);
+            return;
+        }
+        boolean pending = false;
+        for (int dx = -this.config.mergeRadius; dx <= this.config.mergeRadius; dx++) {
+            for (int dz = -this.config.mergeRadius; dz <= this.config.mergeRadius; dz++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                final Section<D> other = this.sections.get(SectionKey.pack(seed.x + dx, seed.z + dz));
+                if (other == null || other == seed || !other.isAlive()) {
+                    continue;
+                }
+                if (other.region == null) {
+                    other.region = region;                       // 孤儿存活段：直接吸收
+                    region.sections.add(other);
+                    region.convergenceSeeds.add(other.key);
+                } else if (other.region != region) {
+                    if (other.region.state == RegionState.TICKING || other.region.state == RegionState.DEAD) {
+                        pending = true;                          // 等它释放
+                    } else {
+                        region.convergenceSeeds.addAll(other.region.convergenceSeeds);
+                        this.mergeLocked(region, other.region);   // 语义与释放点吸收一致
+                    }
+                }
+            }
+        }
+        if (pending) {
+            region.convergenceSeeds.add(seed.key);
+        }
+    }
 
-    /** 反复吸收 mergeRadius 内可合并的邻居区域，直到收敛（不变量 I3'）。 */
+    /** 释放点的收敛：只扫"可能产生跨区域邻接"的种子段（正常 tick 下种子为空 ⇒ 零成本）。 */
     private void convergeLocked(final Region<D> region) {
         Region<D> other;
         while ((other = this.findAdjacentLocked(region)) != null) {
+            region.convergenceSeeds.addAll(other.convergenceSeeds);
             this.mergeLocked(region, other);
         }
     }
 
-    /** 找到 mergeRadius 内第一个可并入 {@code region} 的邻居区域；孤儿存活段直接吸收。 */
+    /** 在【种子段】邻域里找可并入的区域；种子扫完仍无可并入者则清空种子。 */
     private Region<D> findAdjacentLocked(final Region<D> region) {
+        if (region.convergenceSeeds.isEmpty()) {
+            return null;
+        }
         final int r = this.config.mergeRadius;
-        for (final Section<D> self : new ArrayList<>(region.sections)) {
+        final java.util.Iterator<Long> it = region.convergenceSeeds.iterator();
+        while (it.hasNext()) {
+            final long key = it.next();
+            final int sx = SectionKey.unpackX(key);
+            final int sz = SectionKey.unpackZ(key);
             for (int dx = -r; dx <= r; dx++) {
                 for (int dz = -r; dz <= r; dz++) {
                     if (dx == 0 && dz == 0) {
                         continue;
                     }
-                    final Section<D> other = this.sections.get(SectionKey.pack(self.x + dx, self.z + dz));
+                    final Section<D> other = this.sections.get(SectionKey.pack(sx + dx, sz + dz));
                     if (other == null || !other.isAlive()) {
                         continue;
                     }
                     if (other.region == null) {
-                        other.region = region;           // 孤儿存活段：直接吸收
+                        other.region = region;                   // 孤儿存活段：直接吸收
                         region.sections.add(other);
                     } else if (other.region != region && other.region.state != RegionState.TICKING
                             && other.region.state != RegionState.DEAD) {
@@ -356,30 +417,62 @@ public final class Regionizer<D> {
                     }
                 }
             }
+            it.remove();     // 该种子已扫过：若邻域里有 TICKING 区域，会在别处重新登记
+        }
+        // 复查：区域内是否存在与 TICKING 区域相邻的段（有则继续保留种子，等待对方释放）
+        for (final Section<D> self : region.sections) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (dx == 0 && dz == 0) {
+                        continue;
+                    }
+                    final Section<D> other = this.sections.get(SectionKey.pack(self.x + dx, self.z + dz));
+                    if (other != null && other.isAlive() && other.region != null && other.region != region
+                            && other.region.state == RegionState.TICKING) {
+                        region.convergenceSeeds.add(self.key);
+                        return null;     // 等对方释放（S4）
+                    }
+                }
+            }
         }
         return null;
     }
 
-    /** 回收死段 → 重算连通分量 → 必要时分裂。 */
+    /** 回收死段；**仅当确实回收了死段**才重算连通分量（形状没变就不可能分裂）。 */
     private void recomputeLocked(final Region<D> region) {
         if (region.state == RegionState.DEAD) {
             return;
         }
-        // 1) 回收死段（不变量 I6）
-        for (final Iterator<Section<D>> it = region.sections.iterator(); it.hasNext(); ) {
-            final Section<D> s = it.next();
-            if (!s.isAlive()) {
+        // 1) 回收死段（只遍历 deadSections，代价与该区域死段数成正比；常见情况为空 ⇒ 零成本）
+        boolean removed = false;
+        if (!region.deadSections.isEmpty()) {
+            for (final java.util.Iterator<Long> it = region.deadSections.iterator(); it.hasNext(); ) {
+                final long key = it.next();
+                final Section<D> s = this.sections.get(key);
+                if (s == null) {
+                    it.remove();
+                    continue;
+                }
+                if (s.isAlive()) {              // 期间复活了（并发 addChunk）：只撤销登记
+                    it.remove();
+                    continue;
+                }
                 it.remove();
+                region.sections.remove(s);
                 s.region = null;
                 if (s.chunkCount == 0) {
-                    this.sections.remove(s.key);   // 无区块、无邻居、无区域 → 段本身也可以消失
+                    this.sections.remove(s.key);
                 }
+                removed = true;
             }
         }
         if (region.sections.isEmpty()) {
             this.callbacks.onRegionDeactivate(region);
             this.destroyRegionLocked(region);
             return;
+        }
+        if (!removed) {
+            return;             // 形状未变：跳过 BFS（这是释放点成本从 ms 级降到 µs 级的关键）
         }
 
         // 2) 连通分量（不变量 I1/I2 的语义判据 S2）
@@ -392,8 +485,6 @@ public final class Regionizer<D> {
         components.sort((a, b) -> Long.compare(minKey(a), minKey(b)));
         this.callbacks.onRegionPreSplit(region);
 
-        // 映射表覆盖所有【存活】的段：留在原区域的映射到原区域数据，
-        // 被迁走的映射到新区域数据；死段不在表中（其状态应被丢弃）。
         final Map<Long, D> newDataByKey = new LinkedHashMap<>();
         for (final Section<D> s : region.sections) {
             newDataByKey.put(s.key, region.data);
@@ -406,8 +497,9 @@ public final class Regionizer<D> {
                 region.sections.remove(s);
                 s.region = nr;
                 nr.sections.add(s);
-                newDataByKey.put(s.key, nr.data);   // 覆盖为"迁到新区域"
+                newDataByKey.put(s.key, nr.data);
             }
+            nr.convergenceSeeds.addAll(region.convergenceSeeds);
             created.add(nr);
         }
         this.callbacks.splitState(region.data, this.config.regionShift, newDataByKey, newDataByKey.values());
@@ -490,6 +582,10 @@ public final class Regionizer<D> {
             s.region = into;
             into.sections.add(s);
         }
+        into.convergenceSeeds.addAll(from.convergenceSeeds);
+        from.convergenceSeeds.clear();
+        into.deadSections.addAll(from.deadSections);      // 死段随段一起搬（上游 mergeInto 同做法）
+        from.deadSections.clear();
         from.sections.clear();
         this.destroyRegionLocked(from);
         this.updateStateLocked(into);

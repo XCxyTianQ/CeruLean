@@ -17,3 +17,7 @@ echo "== 编译 test"
 "$JH/bin/javac" -cp "$OUT" -d "$OUT" $(find "$DIR/src/test/java" -name '*.java')
 echo "== 运行"
 "$JH/bin/java" -cp "$OUT" io.cerulean.regionizer.test.AllTests
+if [ "${CERULEAN_BENCH:-}" = "1" ]; then
+    echo "== 微基准（CERULEAN_BENCH=1 时运行）"
+    "$JH/bin/java" -cp "$OUT" io.cerulean.regionizer.test.Benchmark
+fi

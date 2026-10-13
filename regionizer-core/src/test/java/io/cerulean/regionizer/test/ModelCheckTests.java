@@ -41,7 +41,7 @@ public final class ModelCheckTests {
     private static void trial(final T t, final int shift, final int radius, final long seed, final int ops) {
         final String name = "shift=" + shift + " mergeRadius=" + radius + " seed=" + seed;
         final Bag.Callbacks cb = new Bag.Callbacks();
-        final Regionizer<Bag> riz = new Regionizer<>(new RegionizerConfig(shift, radius), Bag::new, cb);
+        final Regionizer<Bag> riz = new Regionizer<>(new RegionizerConfig(shift, radius, true), Bag::new, cb);
         final ReferenceModel oracle = new ReferenceModel();
         final Random rnd = new Random(seed);
         final List<String> history = new ArrayList<>();
