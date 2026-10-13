@@ -77,14 +77,22 @@ echo "PID $(cat "$RUN_DIR/server.pid")，日志 $RUN_DIR/server-console.log"
 # 说明：paperclip 容器首次运行需要解包 62MB 原版 bundler + 103 个依赖库并现场打补丁，
 # 实测首次启动到 RCON 可用会超过 3 分钟（控制台刷进度符 >），因此上限放宽。
 i=0
+SERVER_PID=$(cat "$RUN_DIR/server.pid")
 while [ $i -lt 210 ]; do
   if python3 "$SCRIPT_DIR/rcon.py" --port "$RCON_PORT" --password "$RCON_PASSWORD" \
        --command list >/dev/null 2>&1; then
     echo "RCON 已就绪（等待 $((i * 2)) 秒）"
     exit 0
   fi
+  # 关键：进程已经退出就别再干等（否则"jar 不对/启动即崩"要白等 7 分钟，
+  # 而且失败信息被淹没）。这里立刻失败并把控制台尾部打出来。
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "服务端进程已退出（PID $SERVER_PID），未等到 RCON。控制台最后几行："
+    tail -5 "$RUN_DIR/server-console.log" 2>/dev/null | sed 's/^/    /'
+    exit 1
+  fi
   i=$((i + 1))
   sleep 2
 done
-echo "RCON 在 180 秒内未就绪；请检查 $RUN_DIR/server-console.log"
+echo "RCON 在 420 秒内未就绪；请检查 $RUN_DIR/server-console.log"
 exit 1

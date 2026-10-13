@@ -48,7 +48,10 @@ jobs:
         id: artifact
         run: |
           set -e
-          jar=$(find . -name "*paperclip*.jar" -o -name "cerulean-*.jar" | grep -v sources | head -1)
+          # 必须选 paperclip 容器 jar：根目录 build/libs 下的聚合 jar 没有 Main-Class，
+          # 用它启动会得到 "no main manifest attribute"（实测踩过，且当时被下面的 || 吞掉了）
+          jar=$(ls cerulean-server/build/libs/*paperclip*.jar | head -1)
+          [ -f "$jar" ] || { echo "找不到 paperclip jar"; exit 1; }
           echo "jar=$jar" >> "$GITHUB_OUTPUT"
           ls -l "$jar"
 
@@ -65,7 +68,9 @@ jobs:
           CERULEAN_EXPECT_MC: "26.3"
         run: |
           chmod +x tools/smoke/*.sh
-          tools/smoke/run-smoke.sh "${{ steps.artifact.outputs.jar }}" ./smoke-report || echo "SMOKE_FAILED=1" >> "$GITHUB_ENV"
+          # 不吞失败：冒烟失败必须让 job 变红（曾经用 `|| echo SMOKE_FAILED=1`，
+          # 而全流程无人检查该变量，导致 CI 假绿）
+          tools/smoke/run-smoke.sh "${{ steps.artifact.outputs.jar }}" ./smoke-report
 
       - name: 上传冒烟报告
         if: always()
