@@ -27,7 +27,12 @@ import net.minecraft.server.level.ServerLevel;
  */
 public final class CeruLeanRegions {
 
-    /** C2 配置：16×16 区块的段、合并半径 2（与上游 gridExponent=4 对齐；mergeRadius 是本项目自己的语义参数）。 */
+    /**
+     * 服务端配置：16×16 区块的段（= 上游 gridExponent 4）、**3×3 方形邻居**（= 上游
+     * {@code emptySectionCreateRadius=1}）、**合并半径 2 段 = 32 区块**（上游 {@code regionSectionMergeRadius=1}，我们更保守）。
+     *
+     * <p>取值来自上游 Folia 26.2 补丁里 {@code ServerLevel} 的构造实参；C3 会把它做成服务端可配置项。</p>
+     */
     public static final RegionizerConfig CONFIG = RegionizerConfig.defaults();
 
     private final ServerLevel level;

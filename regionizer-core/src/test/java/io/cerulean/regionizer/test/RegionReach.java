@@ -9,74 +9,78 @@ import io.cerulean.regionizer.Regionizer;
 import io.cerulean.regionizer.RegionizerConfig;
 
 /**
- * 区域"覆盖半径"测量——回答游戏侧问题：**刷怪塔/挂机点会不会被区域边界切开**。
+ * 区域"覆盖半径"扫描：段大小 × mergeRadius × 邻居语义。
  *
- * <p>原版规则（源码已核实）：刷怪点必须在玩家 24 格外（欧氏 `distanceToSqr &lt;= 576` 排除）、
- * 敌怪在 128 格外消失；区块状态（ticking/entity-ticking）由票据的**方形**区块距离决定。
- * 因此 farm 的有效半径 ≤ 128 格 = 8 区块。</p>
+ * <p>游戏侧问题：技术服的大型红石机械可能跨越很大范围。要判断"机械会不会被切成两个区域"，
+ * 关键量是**同区域 reach**（两个位置相距多远仍属同一区域），它由
+ * {@code mergeRadius}（段，Chebyshev）与段大小决定；邻居形状只影响约有界的一圈。</p>
  *
- * <p>本测量给出两个数字：</p>
- * <ol>
- *   <li>单玩家：区域边界距玩家中心多远（能否覆盖 128 格）</li>
- *   <li>两玩家：相距多远才会被切成两个区域（同区域 reach）</li>
- * </ol>
- * 并对 4 正邻 / 3×3 方形两种语义分别测量，回答"邻居语义是否影响 farm"。
+ * <p>原版参照：刷怪 24 格排除（欧氏）、敌怪 128 格消失（{@code MobCategory.MONSTER(...,128)}）。</p>
  */
 public final class RegionReach {
+
+    private static final int PER = 16;      // regionShift = 4
 
     private RegionReach() {
     }
 
-    private static final int PER = 16;   // regionShift=4
-
     public static void main(final String[] args) {
-        System.out.println("== 区域覆盖半径测量（regionShift=4 → 段=16 区块；mergeRadius=2 → 32 区块）");
+        System.out.println("== 区域覆盖半径扫描（段=16 区块，1 区块=16 格）");
+        System.out.println("   上游 Folia 取值：emptySectionCreateRadius=1（3×3）, regionSectionMergeRadius=1 段 = 16 区块");
+        System.out.printf("%-12s %-9s %-6s %-16s %-13s %-13s%n",
+                "邻居语义", "mergeR", "视距", "单玩家reach", "两玩家轴阈", "两玩家对角阈");
         for (final Neighbourhood nb : new Neighbourhood[]{Neighbourhood.CARDINAL_4, Neighbourhood.SQUARE_3X3}) {
-            System.out.printf("%n-- 邻居语义 %s%n", nb);
-            for (final int view : new int[]{8, 10, 16}) {
-                // 单玩家：区域能延伸多远？
-                final Regionizer<Bag> one = load(view, nb, 0, 0);
-                final long playerRegion = regionIdAt(one, 0, 0);
-                int maxSameRegion = 0;
-                for (int d = 0; d <= 64; d++) {
-                    if (regionIdAt(one, d, 0) == playerRegion) {
-                        maxSameRegion = d;
-                    }
+            for (final int mergeR : new int[]{1, 2, 3, 4}) {
+                for (final int view : new int[]{8, 10, 16}) {
+                    measure(nb, mergeR, view);
                 }
-                final int despawnChunks = 128 / 16;   // 128 格 = 8 区块
-                System.out.printf("   视距 %2d 区块: 单玩家区域沿轴延伸到 %2d 区块（%3d 格）｜128 格消失半径是否在区域内: %s%n",
-                        view, maxSameRegion, maxSameRegion * 16, maxSameRegion >= despawnChunks ? "是" : "否");
-
-                // 两玩家：相距多远才会分成两个区域？
-                int splitAxial = -1;
-                int splitDiagonal = -1;
-                for (int d = 0; d <= 128; d++) {
-                    final Regionizer<Bag> two = load(view, nb, 0, d);
-                    if (splitAxial < 0 && regionIdAt(two, 0, 0) != regionIdAt(two, d, 0)) {
-                        splitAxial = d;
-                    }
-                    final Regionizer<Bag> twoD = loadDiag(view, nb, d);
-                    if (splitDiagonal < 0 && regionIdAt(twoD, 0, 0) != regionIdAt(twoD, d, d)) {
-                        splitDiagonal = d;
-                    }
-                    if (splitAxial >= 0 && splitDiagonal >= 0) {
-                        break;
-                    }
-                }
-                System.out.printf("   视距 %2d 区块: 两玩家沿轴相距 %s 区块起分属不同区域；沿对角 %s 区块起分属不同区域（1 区块=16 格）%n",
-                        view, splitAxial < 0 ? ">128" : String.valueOf(splitAxial),
-                        splitDiagonal < 0 ? ">128" : String.valueOf(splitDiagonal));
+                System.out.println();
             }
         }
     }
 
-    /** 铺 loading 窗口：单玩家在 (0,0)，可选第二个玩家在 (0,dz) 或 (dz,dz)。 */
-    private static Regionizer<Bag> load(final int view, final Neighbourhood nb, final int dzIgnored, final int dz) {
-        final Regionizer<Bag> r = new Regionizer<>(new RegionizerConfig(4, 2, false, nb), Bag::new, new Bag.Callbacks());
+    private static void measure(final Neighbourhood nb, final int mergeR, final int view) {
+        // 单玩家：区域沿轴能延伸多远
+        final Regionizer<Bag> one = build(nb, mergeR, view, 0, 0, false, 0);
+        final long playerRegion = regionIdAt(one, 0, 0);
+        int reach = 0;
+        for (int d = 0; d <= 200; d++) {
+            if (regionIdAt(one, d, 0) == playerRegion) {
+                reach = d;
+            }
+        }
+
+        // 两玩家：沿轴 / 沿对角多远起分属不同区域
+        int axial = -1;
+        int diag = -1;
+        for (int d = 0; d <= 220 && (axial < 0 || diag < 0); d++) {
+            if (axial < 0) {
+                final Regionizer<Bag> two = build(nb, mergeR, view, d, 0, false, d);
+                if (regionIdAt(two, 0, 0) != regionIdAt(two, d, 0)) {
+                    axial = d;
+                }
+            }
+            if (diag < 0) {
+                final Regionizer<Bag> two = build(nb, mergeR, view, d, d, true, d);
+                if (regionIdAt(two, 0, 0) != regionIdAt(two, d, d)) {
+                    diag = d;
+                }
+            }
+        }
+        System.out.printf("%-12s %-9d %-6d %-16s %-13s %-13s%n", nb, mergeR, view,
+                reach + " 区块(" + (reach * 16) + "格)",
+                axial < 0 ? ">220" : axial + " 区块",
+                diag < 0 ? ">220" : diag + " 区块");
+    }
+
+    /** 铺窗口：玩家 A 在 (0,0)，玩家 B 在 (bx,bz)（都按方形/圆视距铺满）。 */
+    private static Regionizer<Bag> build(final Neighbourhood nb, final int mergeR, final int view,
+                                         final int bx, final int bz, final boolean disc, final int ignored) {
+        final Regionizer<Bag> r = new Regionizer<>(new RegionizerConfig(4, mergeR, false, nb), Bag::new, new Bag.Callbacks());
         final Set<Long> chunks = new HashSet<>();
-        addWindow(chunks, 0, 0, view, false);
-        if (dz != 0) {
-            addWindow(chunks, 0, dz, view, false);
+        window(chunks, 0, 0, view, disc);
+        if (bx != 0 || bz != 0) {
+            window(chunks, bx, bz, view, disc);
         }
         for (final long key : chunks) {
             r.addChunk((int) key * PER + 1, (int) (key >> 32) * PER + 1);
@@ -85,21 +89,7 @@ public final class RegionReach {
         return r;
     }
 
-    private static Regionizer<Bag> loadDiag(final int view, final Neighbourhood nb, final int d) {
-        final Regionizer<Bag> r = new Regionizer<>(new RegionizerConfig(4, 2, false, nb), Bag::new, new Bag.Callbacks());
-        final Set<Long> chunks = new HashSet<>();
-        addWindow(chunks, 0, 0, view, false);
-        if (d != 0) {
-            addWindow(chunks, d, d, view, false);
-        }
-        for (final long key : chunks) {
-            r.addChunk((int) key * PER + 1, (int) (key >> 32) * PER + 1);
-        }
-        Harness.settle(r);
-        return r;
-    }
-
-    private static void addWindow(final Set<Long> out, final int cx, final int cz, final int view, final boolean disc) {
+    private static void window(final Set<Long> out, final int cx, final int cz, final int view, final boolean disc) {
         for (int dx = -view; dx <= view; dx++) {
             for (int dz = -view; dz <= view; dz++) {
                 if (disc && dx * dx + dz * dz > view * view) {

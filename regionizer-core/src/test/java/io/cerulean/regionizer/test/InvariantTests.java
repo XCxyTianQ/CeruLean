@@ -52,8 +52,28 @@ public final class InvariantTests {
         return out;
     }
 
+    /**
+     * 定向用例的期望值是按 **4 正邻**手算的，因此这里**显式声明**语义，
+     * 不依赖"默认值是什么"（默认值改成上游方形后，用例仍然测它自己要测的东西）。
+     */
     static Regionizer<Bag> fresh(final int shift, final int mergeRadius, final Bag.Callbacks cb) {
-        return new Regionizer<>(new RegionizerConfig(shift, mergeRadius, true), Bag::new, cb);
+        return new Regionizer<>(new RegionizerConfig(shift, mergeRadius, true,
+                io.cerulean.regionizer.Neighbourhood.CARDINAL_4), Bag::new, cb);
+    }
+
+    /** 钉住"默认配置 = 上游语义"这一决策，避免以后被无声改掉。 */
+    public static void defaultConfig(final T t) {
+        t.group("默认配置 = 上游语义（3×3 方形 + mergeRadius 2 段）");
+        final RegionizerConfig def = RegionizerConfig.defaults();
+        t.eq("默认邻居语义", io.cerulean.regionizer.Neighbourhood.SQUARE_3X3, def.neighbourhood);
+        t.eq("默认合并半径（段）", 2, def.mergeRadius);
+        t.eq("默认段大小位移", 4, def.regionShift);
+        t.eq("默认关闭 I2 快照（生产路径）", false, def.trackTickingSections);
+
+        final Regionizer<Bag> r = new Regionizer<>(def, Bag::new, new Bag.Callbacks());
+        r.addChunk(cx(0, 3), cx(0, 3));
+        t.eq("1 个区块 ⇒ 9 个存活段（3×3 方形 + 自身）", 9, r.sectionCount());
+        t.noViolations("不变量", r.verifyInvariants(true));
     }
 
     public static void sectionKey(final T t) {
@@ -252,6 +272,7 @@ public final class InvariantTests {
 
     public static void run(final T t) {
         sectionKey(t);
+        defaultConfig(t);
         closedFormAlive(t);
         bridgeSection(t);
         split(t);

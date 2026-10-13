@@ -36,11 +36,11 @@ public final class RegionizerConfig {
     public final Neighbourhood neighbourhood;
 
     public RegionizerConfig(final int regionShift, final int mergeRadius) {
-        this(regionShift, mergeRadius, false);
+        this(regionShift, mergeRadius, false, Neighbourhood.SQUARE_3X3);   // 默认上游语义
     }
 
     public RegionizerConfig(final int regionShift, final int mergeRadius, final boolean trackTickingSections) {
-        this(regionShift, mergeRadius, trackTickingSections, Neighbourhood.CARDINAL_4);
+        this(regionShift, mergeRadius, trackTickingSections, Neighbourhood.SQUARE_3X3);   // 默认上游语义
     }
 
     public RegionizerConfig(final int regionShift, final int mergeRadius, final boolean trackTickingSections,
@@ -57,9 +57,16 @@ public final class RegionizerConfig {
         this.neighbourhood = neighbourhood;
     }
 
-    /** 默认：16×16 区块的段、合并半径 2。 */
+    /**
+     * 默认配置：16×16 区块的段、**合并半径 2 段（32 区块）**、**3×3 方形邻居（上游语义）**。
+     *
+     * <p>为什么默认用上游的方形而不是我们更省的 4 正邻：**服务器侧技术机械的尺寸不可估量**，
+     * 采用上游已被大量服务器验证过的语义，裕度更大、争议更小（实测分区分界相差约 1 区块）。
+     * 同时注意：上游的 {@code regionSectionMergeRadius = 1}（16 区块），我们取 2（32 区块），
+     * 即在"大机械是否被切开"这个维度上比上游更保守一倍。</p>
+     */
     public static RegionizerConfig defaults() {
-        return new RegionizerConfig(4, 2);
+        return new RegionizerConfig(4, 2, false, Neighbourhood.SQUARE_3X3);
     }
 
     public RegionizerConfig withMergeRadius(final int mergeRadius) {
