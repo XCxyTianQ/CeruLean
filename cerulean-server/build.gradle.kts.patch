@@ -22,14 +22,20 @@
      updatingMinecraft {
          //oldPaperCommit = "e5fe71723e2ffde7cc9fafc085ac3bb73e63175e"
      }
-@@ -86,7 +99,19 @@ if (project.providers.gradleProperty("publishDevBundle").isPresent) {
+@@ -86,7 +99,25 @@ if (project.providers.gradleProperty("publishDevBundle").isPresent) {
      }
  }
  
 -val log4jPlugins = sourceSets.create("log4jPlugins")
 +sourceSets {
 +    main {
-+        java { srcDir("../paper-server/src/main/java"); srcDir("../paper-server/src/generated/java") }
++        java {
++            srcDir("../paper-server/src/main/java"); srcDir("../paper-server/src/generated/java")
++            // CeruLean start - 我们的源码目录（单一来源，勿复制进补丁）
++            srcDir("../regionizer-core/src/main/java")    // 纯 Java 区域化内核（C1，含模型检验与参照实现）
++            srcDir("../cerulean-regions/src/main/java")   // MC 侧接线与诊断命令（C2）
++            // CeruLean end
++        }
 +        resources { srcDir("../paper-server/src/main/resources") }
 +    }
 +    test {
@@ -43,7 +49,7 @@
  configurations.named(log4jPlugins.compileClasspathConfigurationName) {
      extendsFrom(configurations.compileClasspath.get())
  }
-@@ -109,7 +134,7 @@ abstract class MockitoAgentProvider : CommandLineArgumentProvider {
+@@ -109,7 +140,7 @@ abstract class MockitoAgentProvider : CommandLineArgumentProvider {
  }
  
  dependencies {
@@ -52,7 +58,7 @@
      implementation(platform("ca.spottedleaf.leafpile:bom:1.2.4"))
      implementation("ca.spottedleaf.leafpile:common")
      implementation("ca.spottedleaf.leafpile:concurrentutil")
-@@ -173,14 +198,14 @@ tasks.jar {
+@@ -173,14 +204,14 @@ tasks.jar {
          val gitBranch = git.exec(providers, "rev-parse", "--abbrev-ref", "HEAD").get().trim()
          attributes(
              "Main-Class" to "org.bukkit.craftbukkit.Main",
@@ -72,7 +78,7 @@
              "Build-Number" to (build ?: ""),
              "Build-Time" to buildTime.toString(),
              "Git-Branch" to gitBranch,
-@@ -341,7 +366,7 @@ tasks.registerRunTask("runPaperclip") {
+@@ -341,7 +372,7 @@ tasks.registerRunTask("runPaperclip") {
  }
  
  fill {

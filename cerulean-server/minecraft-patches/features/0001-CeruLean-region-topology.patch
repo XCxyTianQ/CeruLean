@@ -1,0 +1,75 @@
+diff --git a/ca/spottedleaf/moonrise/paper/util/BaseChunkSystemHooks.java b/ca/spottedleaf/moonrise/paper/util/BaseChunkSystemHooks.java
+index 4baf462..7543de4 100644
+--- a/ca/spottedleaf/moonrise/paper/util/BaseChunkSystemHooks.java
++++ b/ca/spottedleaf/moonrise/paper/util/BaseChunkSystemHooks.java
+@@ -75,12 +75,16 @@ public abstract class BaseChunkSystemHooks implements ca.spottedleaf.moonrise.co
+ 
+     @Override
+     public void onChunkHolderCreate(final ServerLevel level, final ChunkHolder holder) {
+-
++        // CeruLean start - region topology
++        level.ceruleanRegions.addChunk(holder.getPos().x(), holder.getPos().z()); // 26.3: ChunkPos 是 record，用访问器
++        // CeruLean end - region topology
+     }
+ 
+     @Override
+     public void onChunkHolderDelete(final ServerLevel level, final ChunkHolder holder) {
+-
++        // CeruLean start - region topology
++        level.ceruleanRegions.removeChunk(holder.getPos().x(), holder.getPos().z());
++        // CeruLean end - region topology
+     }
+ 
+     @Override
+diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
+index d9acbf6..725e03e 100644
+--- a/net/minecraft/commands/Commands.java
++++ b/net/minecraft/commands/Commands.java
+@@ -213,6 +213,9 @@ public class Commands {
+         DifficultyCommand.register(this.dispatcher);
+         EffectCommands.register(this.dispatcher, context);
+         EmoteCommands.register(this.dispatcher);
++        // CeruLean start - region topology diagnostics
++        io.cerulean.regions.CeruLeanCommand.register(this.dispatcher);
++        // CeruLean end - region topology diagnostics
+         EnchantCommand.register(this.dispatcher, context);
+         ExperienceCommand.register(this.dispatcher);
+         FillCommand.register(this.dispatcher, context);
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 8389d81..daa2a08 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -609,6 +609,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     }
+     // Paper end - chunk tick iteration
+ 
++    // CeruLean start - region topology
++    /** 该 world 的区域化接线（C2：只驱动拓扑；C3 起承担区域调度与跨区域派发）。 */
++    public final io.cerulean.regions.CeruLeanRegions ceruleanRegions;
++    // CeruLean end - region topology
++
+     public ServerLevel(
+         final MinecraftServer server,
+         final Executor executor,
+@@ -637,6 +642,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         final GameRules gameRules = new GameRules(server.getWorldData().enabledFeatures(), savedDataStorage.computeIfAbsent(net.minecraft.world.level.gamerules.GameRuleMap.TYPE));
+         this.gameRules = gameRules;
+         super(levelData, dimension, server.registryAccess(), levelStem.type(), false, isDebug, biomeZoomSeed, server.getMaxChainedNeighborUpdates(), loadedWorldData.bukkitName(), gen, biomeProvider, env, spigotConfig -> server.paperConfigurations.createWorldConfig(io.papermc.paper.configuration.PaperConfigurations.createWorldContextMap(server.storageSource.getDimensionPath(dimension), dimension.identifier(), spigotConfig, server.registryAccess(), gameRules)), executor); // Paper - create paper world configs // Paper - Anti-Xray - Pass executor
++        // CeruLean start - region topology（必须在 super(...) 之后）
++        this.ceruleanRegions = new io.cerulean.regions.CeruLeanRegions(this);
++        // CeruLean end - region topology
+         this.weatherData = savedDataStorage.computeIfAbsent(WeatherData.TYPE);
+         this.weatherData.setLevel(this);
+         this.typeKey = typeKey;
+@@ -937,6 +945,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         this.debugSynchronizers.tick(this.server.debugSubscribers());
+         profiler.pop();
+         this.chunkSource.randomState().garbageCollect();
++        // CeruLean start - region topology
++        // 串行拓扑 tick：让每个区域经历一次"取 tick → 释放"（合并 / 回收死段 / 必要时分裂）。
++        // C2 世界内容仍由 Paper 原样 tick，这里只驱动拓扑本身。
++        this.ceruleanRegions.tickTopology();
++        // CeruLean end - region topology
+     }
+ 
+     @Override

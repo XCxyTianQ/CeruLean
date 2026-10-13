@@ -12,6 +12,10 @@
 #   JAVA_MEM=2G             堆上限
 set -e
 
+# 脚本目录必须先绝对化：后面会 cd 进运行目录，届时相对路径会失效（实测踩过：
+# 就绪轮询里调用 rcon.py 时路径失效，导致"服务端已就绪却一直等到超时"）。
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
 JAR=${1:?用法: server-up.sh <jar> [运行目录]}
 RUN_DIR=${2:-$PWD/smoke-run}
 : "${MC_PORT:=25565}"
@@ -35,8 +39,9 @@ mkdir -p "$RUN_DIR"
 RUN_DIR=$(cd "$RUN_DIR" && pwd)
 printf 'eula=true\n' > "$RUN_DIR/eula.txt"
 
-if [ ! -f "$RUN_DIR/server.properties" ]; then
-  cat > "$RUN_DIR/server.properties" <<EOF
+# 每次启动都按参数重写：运行目录是可抛弃的；残留配置（尤其 rcon.port/rcon.password）
+# 会造成"服务端已就绪但 RCON 连不上"的误判（实测踩过）。
+cat > "$RUN_DIR/server.properties" <<EOF
 level-name=smoke-world
 level-type=minecraft\:flat
 online-mode=false
@@ -51,7 +56,6 @@ view-distance=4
 simulation-distance=4
 motd=CeruLean smoke
 EOF
-fi
 
 echo "启动服务端: $JAR"
 echo "  运行目录 $RUN_DIR / 游戏端口 $MC_PORT / RCON $RCON_PORT / 堆 $JAVA_MEM"
@@ -74,7 +78,7 @@ echo "PID $(cat "$RUN_DIR/server.pid")，日志 $RUN_DIR/server-console.log"
 # 实测首次启动到 RCON 可用会超过 3 分钟（控制台刷进度符 >），因此上限放宽。
 i=0
 while [ $i -lt 210 ]; do
-  if python3 "$(dirname "$0")/rcon.py" --port "$RCON_PORT" --password "$RCON_PASSWORD" \
+  if python3 "$SCRIPT_DIR/rcon.py" --port "$RCON_PORT" --password "$RCON_PASSWORD" \
        --command list >/dev/null 2>&1; then
     echo "RCON 已就绪（等待 $((i * 2)) 秒）"
     exit 0

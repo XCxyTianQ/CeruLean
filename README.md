@@ -38,7 +38,8 @@ CeruLean Cores 是一个 Minecraft Java 版服务端发行版。它**不是**又
 | 发行物可复现校验 | ✅ 自带工具可复现上游/自家分发链并逐字节校验（含篡改自检） |
 | 语义基线冒烟 | ✅ RCON 驱动的用例集，可对原生 Paper 与自家产物运行 |
 | 品牌与配置 | ✅ 产物的 MANIFEST 为 `Brand-Id: cerulean:cores`（已实测） |
-| **区域化并行 tick** | ❌ **尚未实现**（Phase 2，路线与设计已冻结） |
+| **区域化拓扑接线（C2）** | ✅ **已接入真实服务端**：区域可切分/查询/串行 tick，行为与 vanilla 逐项一致（见 [docs/08](docs/08-C2-验收记录.md)） |
+| **区域化并行 tick** | ❌ 尚未实现（C3：区域→线程调度、段级票据、跨区域派发） |
 | 命令方块语义层 | ❌ 尚未开始（Phase 2 之后） |
 
 > 换句话说：现在构建出来的东西，行为**等同于 Paper 26.3**，只是换成了 CeruLean 的身份与构建管线。这一点我们不会含糊过去。
@@ -49,7 +50,7 @@ CeruLean Cores 是一个 Minecraft Java 版服务端发行版。它**不是**又
 |---|---|---|
 | **Phase 0** | 上游 pin 登记、可复现校验工具、补丁栈目录、CI | ✅ 完成 |
 | **Phase 1** | paperweight 构建接入、参数化语义基线 | ✅ 完成 |
-| **Phase 2** | **区域化（自研）**：C0 设计 → C1 纯 Java 核心 → C2 MC 适配（可运行中间态）→ C3 内容并行 → C4 生产化 | 🔄 C0 完成，C1 待开始 |
+| **Phase 2** | **区域化（自研）**：C0 设计 → C1 纯 Java 核心 → C2 MC 接线 → C3 内容并行 → C4 生产化 | 🔄 C0/C1/C2 完成，C3 待开始 |
 | **Phase 3** | 命令语义 / 命令方块 EXP 链 | ⏳ 未开始 |
 
 区域化的设计规格见 **[docs/06-区域化设计规格.md](docs/06-区域化设计规格.md)**：其中包含 9 条不变量、状态机、锁纪律、状态挂载与迁移契约、跨区域访问的唯一通道，以及**明确列出的、我们与上游实现不同的 6 处取舍**。
@@ -83,6 +84,8 @@ java -Xmx4G -jar cerulean-server/build/libs/cerulean-paperclip-*.jar --nogui
 CeruLean/
 ├── build.gradle.kts / settings.gradle.kts     paperweight patcher 配置（patch-only fork）
 ├── gradle.properties                          上游 pin（版本 / 构建号 / sha256 锁定）
+├── regionizer-core/                           纯 Java 区域化内核（C1；零 MC 依赖，含模型检验）
+├── cerulean-regions/                          MC 侧接线与诊断命令（C2）
 ├── cerulean-server/                           服务端侧补丁（minecraft-patches / paper-patches）
 ├── cerulean-api/                              API 侧补丁
 ├── cerulean-checkstyle/                       代码风格模块适配（Paper 26.3 新增了该模块）
