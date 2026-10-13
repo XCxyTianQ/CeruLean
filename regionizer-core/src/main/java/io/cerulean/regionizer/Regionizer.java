@@ -43,8 +43,13 @@ import java.util.function.Supplier;
  */
 public final class Regionizer<D> {
 
-    /** 四邻（上下左右）。存活判据只认四邻，见 S1。 */
-    private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    /**
+     * 邻居偏移由 {@link RegionizerConfig#neighbourhoodRadius} 决定（物化范围 == 存活判定范围）。
+     * 默认 4 正邻；{@code neighbourhoodRadius=1} 时为 3×3 方形（等价上游 createRadius=1）。
+     */
+    private int[][] neighbours() {
+        return this.config.neighbourhood.offsets();
+    }
 
     private final RegionizerConfig config;
     private final Supplier<D> dataFactory;
@@ -93,7 +98,7 @@ public final class Regionizer<D> {
                 if (section.nonEmptyNeighbours == 0 && section.region != null) {
                     section.region.markDead(section);       // 自己变死
                 }
-                for (final int[] d : CARDINALS) {
+                for (final int[] d : this.neighbours()) {
                     final Section<D> n = this.sections.get(SectionKey.pack(section.x + d[0], section.z + d[1]));
                     if (n != null) {
                         n.nonEmptyNeighbours--;
@@ -253,7 +258,7 @@ public final class Regionizer<D> {
         Section<D> section = this.sections.get(key);
         if (section == null) {
             section = new Section<>(key, sx, sz);
-            for (final int[] d : CARDINALS) {
+            for (final int[] d : this.neighbours()) {
                 final Section<D> n = this.sections.get(SectionKey.pack(sx + d[0], sz + d[1]));
                 if (n != null && n.chunkCount > 0) {
                     section.nonEmptyNeighbours++;
@@ -264,7 +269,7 @@ public final class Regionizer<D> {
 
         if (section.chunkCount == 0) {
             // 本段由空变非空：通知【已存在】的四邻（它们多了一个"非空邻居"）
-            for (final int[] d : CARDINALS) {
+            for (final int[] d : this.neighbours()) {
                 final Section<D> n = this.sections.get(SectionKey.pack(sx + d[0], sz + d[1]));
                 if (n != null) {
                     if (n.chunkCount == 0 && n.nonEmptyNeighbours == 0 && n.region != null) {
@@ -284,14 +289,14 @@ public final class Regionizer<D> {
             this.attachLocked(section);
         }
         // 物化四邻（S1 的闭式集合）：缺失的邻居此刻创建，其"非空邻居"计数会自然包含本段。
-        for (final int[] d : CARDINALS) {
+        for (final int[] d : this.neighbours()) {
             final int nx = sx + d[0];
             final int nz = sz + d[1];
             final long nk = SectionKey.pack(nx, nz);
             Section<D> neighbour = this.sections.get(nk);
             if (neighbour == null) {
                 neighbour = new Section<>(nk, nx, nz);
-                for (final int[] e : CARDINALS) {
+                for (final int[] e : this.neighbours()) {
                     final Section<D> nn = this.sections.get(SectionKey.pack(nx + e[0], nz + e[1]));
                     if (nn != null && nn.chunkCount > 0) {
                         neighbour.nonEmptyNeighbours++;
@@ -680,7 +685,7 @@ public final class Regionizer<D> {
             // I5 + 孤儿检查：段的 nonEmptyNeighbours 必须等于四邻中区块数 > 0 的个数
             for (final Section<D> s : this.sections.values()) {
                 int expect = 0;
-                for (final int[] d : CARDINALS) {
+                for (final int[] d : this.neighbours()) {
                     final Section<D> n = this.sections.get(SectionKey.pack(s.x + d[0], s.z + d[1]));
                     if (n != null && n.chunkCount > 0) {
                         expect++;

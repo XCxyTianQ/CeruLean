@@ -32,11 +32,19 @@ public final class RegionizerConfig {
      */
     public final boolean trackTickingSections;
 
+    /** 邻居语义（物化范围 == 存活判定范围）。默认 {@link Neighbourhood#CARDINAL_4}。 */
+    public final Neighbourhood neighbourhood;
+
     public RegionizerConfig(final int regionShift, final int mergeRadius) {
         this(regionShift, mergeRadius, false);
     }
 
     public RegionizerConfig(final int regionShift, final int mergeRadius, final boolean trackTickingSections) {
+        this(regionShift, mergeRadius, trackTickingSections, Neighbourhood.CARDINAL_4);
+    }
+
+    public RegionizerConfig(final int regionShift, final int mergeRadius, final boolean trackTickingSections,
+                            final Neighbourhood neighbourhood) {
         if (regionShift < 0 || regionShift > 16) {
             throw new IllegalArgumentException("regionShift 越界: " + regionShift);
         }
@@ -46,6 +54,7 @@ public final class RegionizerConfig {
         this.regionShift = regionShift;
         this.mergeRadius = mergeRadius;
         this.trackTickingSections = trackTickingSections;
+        this.neighbourhood = neighbourhood;
     }
 
     /** 默认：16×16 区块的段、合并半径 2。 */
@@ -54,21 +63,27 @@ public final class RegionizerConfig {
     }
 
     public RegionizerConfig withMergeRadius(final int mergeRadius) {
-        return new RegionizerConfig(this.regionShift, mergeRadius, this.trackTickingSections);
+        return new RegionizerConfig(this.regionShift, mergeRadius, this.trackTickingSections, this.neighbourhood);
     }
 
     public RegionizerConfig withShift(final int regionShift) {
-        return new RegionizerConfig(regionShift, this.mergeRadius, this.trackTickingSections);
+        return new RegionizerConfig(regionShift, this.mergeRadius, this.trackTickingSections, this.neighbourhood);
+    }
+
+    /** 换邻居语义（例如 {@link Neighbourhood#SQUARE_3X3} 等价上游 createRadius=1）。 */
+    public RegionizerConfig withNeighbourhood(final Neighbourhood newNeighbourhood) {
+        return new RegionizerConfig(this.regionShift, this.mergeRadius, this.trackTickingSections, newNeighbourhood);
     }
 
     /** 打开 I2 快照（测试/巡检用）。 */
     public RegionizerConfig withTickingSnapshot() {
-        return new RegionizerConfig(this.regionShift, this.mergeRadius, true);
+        return new RegionizerConfig(this.regionShift, this.mergeRadius, true, this.neighbourhood);
     }
 
     @Override
     public String toString() {
         return "Config{shift=" + this.regionShift + ", mergeRadius=" + this.mergeRadius
-                + ", tickingSnapshot=" + this.trackTickingSections + '}';
+                + ", tickingSnapshot=" + this.trackTickingSections
+                + ", neighbourhood=" + this.neighbourhood + '}';
     }
 }

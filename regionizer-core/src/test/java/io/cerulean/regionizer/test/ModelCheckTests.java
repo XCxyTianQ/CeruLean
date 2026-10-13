@@ -29,20 +29,27 @@ public final class ModelCheckTests {
         final long[] seeds = {1L, 7L, 42L, 2026L, 99991L, 123456789L};
         final int ops = 150;
 
-        for (final int shift : shifts) {
-            for (final int radius : radii) {
-                for (final long seed : seeds) {
-                    trial(t, shift, radius, seed, ops);
+        for (final io.cerulean.regionizer.Neighbourhood neighbourhood : new io.cerulean.regionizer.Neighbourhood[]{
+                io.cerulean.regionizer.Neighbourhood.CARDINAL_4,        // 本项目默认
+                io.cerulean.regionizer.Neighbourhood.SQUARE_3X3}) {     // 上游语义（createRadius=1）
+            for (final int shift : shifts) {
+                for (final int radius : radii) {
+                    for (final long seed : seeds) {
+                        trial(t, shift, radius, seed, ops, neighbourhood);
+                    }
                 }
             }
         }
     }
 
-    private static void trial(final T t, final int shift, final int radius, final long seed, final int ops) {
-        final String name = "shift=" + shift + " mergeRadius=" + radius + " seed=" + seed;
+    private static void trial(final T t, final int shift, final int radius, final long seed, final int ops,
+                              final io.cerulean.regionizer.Neighbourhood neighbourhood) {
+        final String name = "邻居=" + neighbourhood
+                + " shift=" + shift + " mergeRadius=" + radius + " seed=" + seed;
         final Bag.Callbacks cb = new Bag.Callbacks();
-        final Regionizer<Bag> riz = new Regionizer<>(new RegionizerConfig(shift, radius, true), Bag::new, cb);
-        final ReferenceModel oracle = new ReferenceModel();
+        final Regionizer<Bag> riz = new Regionizer<>(
+                new RegionizerConfig(shift, radius, true, neighbourhood), Bag::new, cb);
+        final ReferenceModel oracle = new ReferenceModel(neighbourhood);
         final Random rnd = new Random(seed);
         final List<String> history = new ArrayList<>();
 

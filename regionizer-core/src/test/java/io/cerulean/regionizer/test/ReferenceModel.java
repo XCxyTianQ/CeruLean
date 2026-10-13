@@ -20,7 +20,20 @@ import io.cerulean.regionizer.SectionKey;
  */
 public final class ReferenceModel {
 
-    private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    /** 邻居偏移（与实现共用同一语义：物化范围 == 存活判定范围）。 */
+    private final io.cerulean.regionizer.Neighbourhood neighbourhood;
+
+    public ReferenceModel() {
+        this(io.cerulean.regionizer.Neighbourhood.CARDINAL_4);
+    }
+
+    public ReferenceModel(final io.cerulean.regionizer.Neighbourhood neighbourhood) {
+        this.neighbourhood = neighbourhood;
+    }
+
+    private int[][] offsets() {
+        return this.neighbourhood.offsets();
+    }
 
     /** 存在的段 → 区块数（计数可为 0；不存在则不在表里）。 */
     private final Map<Long, Integer> countBySection = new HashMap<>();
@@ -61,7 +74,7 @@ public final class ReferenceModel {
             }
             final int x = SectionKey.unpackX(e.getKey());
             final int z = SectionKey.unpackZ(e.getKey());
-            for (final int[] d : CARDINALS) {
+            for (final int[] d : this.offsets()) {
                 alive.add(SectionKey.pack(x + d[0], z + d[1]));
             }
         }
