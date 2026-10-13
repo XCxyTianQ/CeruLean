@@ -86,17 +86,25 @@ class Rcon:
         self.close()
 
     # ── 命令 ────────────────────────────────────────────────
-    def cmd(self, command, wait=0.25):
-        """发送一条命令，返回服务器响应的文本（可能为空）。"""
+    def cmd(self, command, wait=0.25, first_wait=None):
+        """发送一条命令，返回服务器响应的文本（可能为空）。
+
+        ``first_wait`` 是**首个响应包**的等待上限（默认沿用 ``wait``）。
+        慢命令（例如大范围 ``forceload`` 要现生成区块）必须显式给它一个较大值：
+        否则客户端会在响应到达前超时退出，响应留在缓冲里造成**协议错位**，
+        几轮之后服务端会关闭该连接（表现为 BrokenPipe）——我们踩过这个坑。
+        """
         self.connect()
         self._sock.sendall(self._build_packet(2, 2, command.encode("utf-8")))
         out = b""
-        self._sock.settimeout(wait)
+        first = True
         while True:
+            self._sock.settimeout((first_wait if first_wait is not None else wait) if first else wait)
             try:
                 data = self._recv_packet(self._sock)
             except (socket.timeout, RconError):
                 break
+            first = False
             payload = data[8:]
             if payload.endswith(b"\x00\x00"):
                 payload = payload[:-2]
