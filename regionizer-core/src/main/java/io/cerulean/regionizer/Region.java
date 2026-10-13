@@ -49,6 +49,19 @@ public final class Region<D> {
      */
     final java.util.Set<Long> deadSections = new java.util.LinkedHashSet<>();
 
+    /**
+     * 当前正在 tick 本区域的线程 id（{-1} = 无人拥有）。
+     *
+     * <p>只在 {@code state == TICKING} 期间有意义，由 {@code tryMarkTicking(region, ownerThreadId)}
+     * 写入、{@code markNotTicking} 清空。归属校验（B2）读它来回答"这个位置归谁"。</p>
+     */
+    volatile long ownerThreadId = -1L;
+
+    /** 正在 tick 本区域的线程 id；-1 表示无人拥有（未在 TICKING，或未绑定线程）。 */
+    public long ownerThreadId() {
+        return this.ownerThreadId;
+    }
+
     /** 把段登记为死段（幂等）。 */
     void markDead(final Section<D> section) {
         this.deadSections.add(section.key);

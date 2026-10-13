@@ -54,6 +54,16 @@ public final class CeruLeanRegions {
                     cfg.gridExponent, shift, cfg.mergeRadius, mergeRadius);
         }
         config = new RegionizerConfig(shift, mergeRadius, cfg.trackTickingSections, nb);
+
+        io.cerulean.regionizer.OwnershipCheck.Policy ownership =
+                io.cerulean.regionizer.OwnershipCheck.Policy.OFF;
+        try {
+            ownership = io.cerulean.regionizer.OwnershipCheck.Policy.valueOf(
+                    cfg.ownershipCheck.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (final IllegalArgumentException ex) {
+            LOGGER.warn("未知的 cerulean-regions.ownership-check='{}'，回退为 off", cfg.ownershipCheck);
+        }
+        CeruLeanOwnership.init(ownership);
         LOGGER.info("CeruLean 区域化参数生效：{}（段 {} 区块；邻居 {} 个）",
                 config, 1 << shift, nb.count());
     }
@@ -103,7 +113,8 @@ public final class CeruLeanRegions {
         }
         final long gameTime = this.level.getServer().getTickCount();
         for (final Region<RegionData> region : snapshot) {
-            if (!this.regionizer.tryMarkTicking(region)) {
+            // 绑定"谁在 tick"：C2 里就是调用本方法的线程（主线程）。B2 的归属校验读它。
+            if (!this.regionizer.tryMarkTicking(region, Thread.currentThread().threadId())) {
                 continue;                       // 已被并发吞并/销毁，或正忙
             }
             final RegionData data = region.data();

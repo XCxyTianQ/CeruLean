@@ -82,6 +82,16 @@ jobs:
           chmod +x tools/smoke/*.sh
           tools/smoke/c3-config-acceptance.sh "${{ steps.artifact.outputs.jar }}" ./smoke-config-report
 
+      - name: 归属校验验收（B2：off / soft / strict 三模式）
+        env:
+          CERULEAN_EULA: "TRUE"
+          CERULEAN_EXPECT_MC: "26.3"
+        run: |
+          # 三模式各起一次服务端，断言 off 放行且零记录、soft 放行但记录"将会违规"、strict 拒绝并抛异常。
+          # 这是"归属闸门真的接上了、策略真的生效"的决定性证据（默认 off 时与 Paper 行为一致）。
+          chmod +x tools/smoke/*.sh
+          tools/smoke/b2-ownership-acceptance.sh "${{ steps.artifact.outputs.jar }}" ./smoke-ownership-report
+
       - name: 上传冒烟报告
         if: always()
         uses: actions/upload-artifact@v4
@@ -90,4 +100,5 @@ jobs:
           path: |
             smoke-report/
             smoke-config-report/
+            smoke-ownership-report/
           if-no-files-found: warn

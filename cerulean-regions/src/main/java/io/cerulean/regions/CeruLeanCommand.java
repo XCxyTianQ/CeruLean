@@ -36,6 +36,12 @@ public final class CeruLeanCommand {
     public static LiteralCommandNode<CommandSourceStack> create() {
         return Commands.literal("cerulean")
             .requires(source -> source.getSender().hasPermission(PERMISSION))
+            .then(Commands.literal("ownership")
+                .executes(CeruLeanCommand::ownershipSummary)
+                .then(Commands.literal("verify")
+                    .then(Commands.argument("chunkX", IntegerArgumentType.integer())
+                        .then(Commands.argument("chunkZ", IntegerArgumentType.integer())
+                            .executes(CeruLeanCommand::ownershipVerify)))))
             .then(Commands.literal("regions")
                 .executes(CeruLeanCommand::listRegions))
             .then(Commands.literal("regionat")
@@ -43,6 +49,42 @@ public final class CeruLeanCommand {
                     .then(Commands.argument("chunkZ", IntegerArgumentType.integer())
                         .executes(CeruLeanCommand::regionAt))))
             .build();
+    }
+
+    /** {@code /cerulean ownership}：策略 + "将会违规"的现场汇总（soft 模式用来生成 B5 工作清单）。 */
+    private static int ownershipSummary(final CommandContext<CommandSourceStack> context) {
+        context.getSource().getSender().sendMessage(
+                Component.text(CeruLeanOwnership.summary()));
+        CeruLeanOwnership.sites().entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue().get(), a.getValue().get()))
+                .limit(15)
+                .forEach(entry -> context.getSource().getSender().sendMessage(
+                        Component.text("  " + entry.getValue() + " × " + entry.getKey())));
+        return 1;
+    }
+
+    /**
+     * {@code /cerulean ownership verify <chunkX> <chunkZ>}：端到端自检。
+     *
+     * <p>把该位置的区域临时绑到一个假线程，再让本线程走真正的闸门
+     * {@code TickThread.ensureTickThread(...)}，看策略是否按预期放行/拒绝——
+     * 这是"补丁接上了、策略生效了"的决定性证据（off 应放行、strict 应抛异常）。</p>
+     */
+    private static int ownershipVerify(final CommandContext<CommandSourceStack> context) {
+        final int chunkX = IntegerArgumentType.getInteger(context, "chunkX");
+        final int chunkZ = IntegerArgumentType.getInteger(context, "chunkZ");
+        // 这版 API 里 getExecutor() 是 Bukkit 实体、且没有 CommandSourceStack#getLevel()：
+        // 执行者所在世界优先，控制台/RCON 则退回主世界。
+        final org.bukkit.entity.Entity executor = context.getSource().getExecutor();
+        final ServerLevel level;
+        if (executor != null && executor.getWorld() instanceof org.bukkit.craftbukkit.CraftWorld craftWorld) {
+            level = craftWorld.getHandle();
+        } else {
+            level = MinecraftServer.getServer().overworld();
+        }
+        context.getSource().getSender().sendMessage(Component.text(
+                "归属自检: " + CeruLeanOwnership.verify(level, chunkX, chunkZ)));
+        return 1;
     }
 
     private static int listRegions(final CommandContext<CommandSourceStack> context) {

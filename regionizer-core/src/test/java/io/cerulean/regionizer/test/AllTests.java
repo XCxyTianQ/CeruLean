@@ -10,6 +10,7 @@ public final class AllTests {
         final T t = new T();
         System.out.println("CeruLean regionizer-core 测试");
         InvariantTests.run(t);
+        OwnershipTests.run(t);
         ModelCheckTests.run(t);
         System.exit(t.summary());
     }

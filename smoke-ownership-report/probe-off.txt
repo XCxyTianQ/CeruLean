@@ -1,0 +1,10 @@
+== B2 归属校验探针
+  ✓ 能读到 cerulean-regions.ownership-check   ['off']
+  配置模式: off
+  ✓ 命令回显策略与配置一致   [归属校验: off（与 Paper 行为一致；开启方式见 cerulean-regions.ownership-check）]
+  verify 输出: 归属自检: 策略=OFF / 归属层=允许 / ensureTickThread=未抛异常
+  ✓ 归属层允许   [归属自检: 策略=OFF / 归属层=允许 / ensureTickThread=未抛异常]
+  ✓ ensureTickThread 未抛异常（策略放行）   [归属自检: 策略=OFF / 归属层=允许 / ensureTickThread=未抛异常]
+  ✓ off 模式下没有任何记录（零成本、零行为变更）   [归属校验: off（与 Paper 行为一致；开启方式见 cerulean-regions.ownership-check）]
+
+== 全部断言通过

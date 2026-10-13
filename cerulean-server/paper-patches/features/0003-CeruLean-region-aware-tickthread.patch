@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Mon, 13 Oct 2026 00:00:00 +0800
+Subject: [PATCH] CeruLean region-aware TickThread ownership (B2)
+
+---
+把 TickThread.isTickThreadFor 的 11 个重载接上 CeruLean 的归属判定（B2）。
+默认 off ⇒ CeruLeanOwnership.allows 只做一次 volatile 读就返回 true，行为与 Paper 完全一致；
+soft/strict 由 config/paper-global.yml 的 cerulean-regions.ownership-check 控制。
+注意：带 radius 的圆形/方形范围重载只检查中心位置（保守近似，已在文档标注）。
+---
+diff --git a/paper-server/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java b/paper-server/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+index 69cdd30..94a918e 100644
+--- a/paper-server/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
++++ b/paper-server/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+@@ -127,46 +127,70 @@ public class TickThread extends Thread {
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final BlockPos pos) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        return isTickThread() && io.cerulean.regions.CeruLeanOwnership.allows(world, pos.getX() >> 4, pos.getZ() >> 4);
++        // CeruLean end - region-aware ownership
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final BlockPos pos, final int blockRadius) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        return isTickThread() && io.cerulean.regions.CeruLeanOwnership.allows(world, pos.getX() >> 4, pos.getZ() >> 4);
++        // CeruLean end - region-aware ownership
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final ChunkPos pos) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        return isTickThread() && io.cerulean.regions.CeruLeanOwnership.allows(world, pos.x(), pos.z());
++        // CeruLean end - region-aware ownership
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final Vec3 pos) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        return isTickThread() && io.cerulean.regions.CeruLeanOwnership.allows(world, (int)Math.floor(pos.x) >> 4, (int)Math.floor(pos.z) >> 4);
++        // CeruLean end - region-aware ownership
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final int chunkX, final int chunkZ) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        return isTickThread() && io.cerulean.regions.CeruLeanOwnership.allows(world, chunkX, chunkZ);
++        // CeruLean end - region-aware ownership
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final AABB aabb) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        return isTickThread() && io.cerulean.regions.CeruLeanOwnership.allows(world, (int)Math.floor((aabb.minX + aabb.maxX) * 0.5D) >> 4, (int)Math.floor((aabb.minZ + aabb.maxZ) * 0.5D) >> 4);
++        // CeruLean end - region-aware ownership
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final double blockX, final double blockZ) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        return isTickThread() && io.cerulean.regions.CeruLeanOwnership.allows(world, (int)Math.floor(blockX) >> 4, (int)Math.floor(blockZ) >> 4);
++        // CeruLean end - region-aware ownership
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final Vec3 position, final Vec3 deltaMovement, final int buffer) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        return isTickThread() && io.cerulean.regions.CeruLeanOwnership.allows(world, (int)Math.floor(position.x) >> 4, (int)Math.floor(position.z) >> 4);
++        // CeruLean end - region-aware ownership
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final int fromChunkX, final int fromChunkZ, final int toChunkX, final int toChunkZ) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        return isTickThread() && io.cerulean.regions.CeruLeanOwnership.allows(world, fromChunkX, fromChunkZ) && io.cerulean.regions.CeruLeanOwnership.allows(world, toChunkX, toChunkZ);
++        // CeruLean end - region-aware ownership
+     }
+ 
+     public static boolean isTickThreadFor(final Level world, final int chunkX, final int chunkZ, final int radius) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        return isTickThread() && io.cerulean.regions.CeruLeanOwnership.allows(world, chunkX, chunkZ);
++        // CeruLean end - region-aware ownership
+     }
+ 
+     public static boolean isTickThreadFor(final Entity entity) {
+-        return isTickThread();
++        // CeruLean start - region-aware ownership（默认 off ⇒ 与 Paper 行为完全一致）
++        final Level entityLevel = entity.level();
++        final ChunkPos entityChunk = entity.chunkPosition();
++        return isTickThread() && (entityLevel == null || io.cerulean.regions.CeruLeanOwnership.allows(entityLevel, entityChunk.x(), entityChunk.z()));
++        // CeruLean end - region-aware ownership
+     }
+ }

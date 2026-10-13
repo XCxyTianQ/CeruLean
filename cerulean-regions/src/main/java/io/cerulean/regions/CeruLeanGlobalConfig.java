@@ -33,6 +33,13 @@ public class CeruLeanGlobalConfig extends ConfigurationPart {
     @Comment("是否在进入 TICKING 时复制段集快照（用于不变量校验；生产环境建议 false）。")
     public boolean trackTickingSections = false;
 
+    @Comment(
+        "归属校验（B2）：off = 关闭（默认，与 Paper 行为完全一致）；\n"
+        + "soft = 允许一切但记录“将会违规”的调用现场（用于生成 B5 的工作清单）；\n"
+        + "strict = 拒绝非拥有者访问（需要 B5 先把“必须主线程”的那几步改成“必须拥有该区域的线程”）。"
+    )
+    public String ownershipCheck = "off";
+
     @PostProcess
     private void postProcess() {
         CeruLeanRegions.init(this);

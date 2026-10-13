@@ -140,7 +140,41 @@ public final class Regionizer<D> {
         }
     }
 
-    /** 尝试把区域置为 TICKING（不变量 I3：READY 且无挂起合并）。 */
+    /**
+     * 取 tick 并把本区域**绑定**给 {@code ownerThreadId}（B2 的归属来源）。
+     *
+     * <p>语义与 {@link #tryMarkTicking(Region)} 完全一致，只多记录"谁在 tick"。
+     * 传 {@code -1} 表示不绑定线程（等价于旧行为：释放前不参与归属校验）。</p>
+     */
+    public boolean tryMarkTicking(final Region<D> region, final long ownerThreadId) {
+        final boolean ok = this.tryMarkTicking(region);
+        if (ok) {
+            region.ownerThreadId = ownerThreadId;
+        }
+        return ok;
+    }
+
+    /**
+     * 查询"该区块位置归哪个线程"。
+     *
+     * @return 拥有该位置区域的 tick 线程 id；{@code -1} = 无人拥有
+     *         （该位置没有区域，或区域不在 TICKING，或区域未绑定线程）
+     */
+    public long ownerThreadIdAt(final int chunkX, final int chunkZ) {
+        final Section<D> section = this.sections.get(
+                SectionKey.pack(SectionKey.chunkToSection(chunkX, this.config.regionShift),
+                                SectionKey.chunkToSection(chunkZ, this.config.regionShift)));
+        if (section == null) {
+            return -1L;
+        }
+        final Region<D> region = section.region;
+        if (region == null || region.state != RegionState.TICKING) {
+            return -1L;
+        }
+        return region.ownerThreadId;
+    }
+
+    /** 尝试把区域置为 TICKING（不变量 I3：READY 且无挂起合并）；不绑定线程。 */
     public boolean tryMarkTicking(final Region<D> region) {
         final long stamp = this.lock.writeLock();
         try {
