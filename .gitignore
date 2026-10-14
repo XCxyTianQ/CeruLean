@@ -26,3 +26,12 @@ smoke-config-report/
 # Python 缓存
 __pycache__/
 *.pyc
+smoke-b1-report/
+smoke-ownership-report/
+smoke-failstop-report/
+smoke-edf-load*/
+smoke-b51-load/
+smoke-load-report/
+smoke-config-report*/
+smoke-dbg/
+smoke-threads*/
