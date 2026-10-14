@@ -66,6 +66,7 @@ public final class CeruLeanRegions {
         CeruLeanOwnership.init(ownership);
         SCHEDULER_MODE = "edf".equalsIgnoreCase(cfg.scheduler.trim()) ? "edf" : "serial";
         SCHEDULER_THREADS = cfg.threads;
+        AREA_LOCK = cfg.areaLock;
         LOGGER.info("CeruLean 调度模式：{}（线程数 {}）", SCHEDULER_MODE,
                 "edf".equals(SCHEDULER_MODE) ? String.valueOf(schedulerThreads()) : "串行/主线程");
         LOGGER.info("CeruLean 区域化参数生效：{}（段 {} 区块；邻居 {} 个）",
@@ -162,6 +163,52 @@ public final class CeruLeanRegions {
     public void tickTopology() {
         this.scheduler.driveMainThread();
     }
+
+    /**
+     * 区块系统的**区域锁**（`ChunkTaskScheduler.schedulingLockArea`，粒度 = max(区域位移, 票据传播位移)）。
+     *
+     * <p>B5.1：区域 tick 与"区块状态切换/票据调度"必须**互斥**——这正是上游注释写明的约定
+     * （{@code ChunkTaskScheduler.java:271-275}："regioniser assumes ticket updates do not occur
+     * in parallel for the region sections"）。我们此前只在**事后拒绝**（B2 闸门），
+     * 现在改成**事前互斥**：区域 tick 先拿同一把锁，再进 TICKING。</p>
+     *
+     * <p>惰性获取并缓存：世界构造期间 scheduler 可能尚未就绪。</p>
+     */
+    /** 是否让区域 tick 参与区块系统的区域锁（配置项；默认关闭，实测对当前架构无效）。 */
+    private static volatile boolean AREA_LOCK = false;
+
+    /** 是否需要区域锁（关闭时 {@link #chunkSystemAreaLock()} 直接返回 null ⇒ 零开销）。 */
+    public static boolean areaLockEnabled() {
+        return AREA_LOCK;
+    }
+
+    public ca.spottedleaf.concurrentutil.lock.ReentrantAreaLock chunkSystemAreaLock() {
+        if (!AREA_LOCK) {
+            return null;
+        }
+        ca.spottedleaf.concurrentutil.lock.ReentrantAreaLock cached = this.cachedAreaLock;
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler scheduler =
+                    ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel) this.level)
+                            .moonrise$getChunkTaskScheduler();
+            cached = scheduler == null ? null : scheduler.schedulingLockArea;
+        } catch (final Throwable ignored) {
+            cached = null;                       // 取不到就退化为"不做事前互斥"（B2 闸门仍然在）
+        }
+        this.cachedAreaLock = cached;
+        return cached;
+    }
+
+    /** 区域锁的等待耗时与"等待超过 1ms"的次数（争用信号，供诊断）。 */
+    public final java.util.concurrent.atomic.AtomicLong areaLockNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    public final java.util.concurrent.atomic.AtomicLong areaLockStalls =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    private volatile ca.spottedleaf.concurrentutil.lock.ReentrantAreaLock cachedAreaLock;
 
     /** 关服/世界卸载时停止调度（EDF 会 halt + join 线程池）。 */
     public void shutdown() {

@@ -49,6 +49,15 @@ public class CeruLeanGlobalConfig extends ConfigurationPart {
     @Comment("edf 模式的区域 tick 线程数；-1/0 = 按上游公式自动（cores/2，≤4 取 1，否则再 /4）。")
     public int threads = -1;
 
+    @Comment(
+        "区域 tick 是否参与区块系统的区域锁（ChunkTaskScheduler.schedulingLockArea）。\n"
+        + "上游注释推荐这么做（“regioniser 假定同一 region section 内票据更新不并行”），\n"
+        + "但**实测（2026-10-14）对当前架构无效**：被闸门抓到的路径（POI / ServerEntityLookup /\n"
+        + "handleFullStatusChange）并不持有该锁，加锁后违规数 13→14 毫无改善、strict 仍然停服，\n"
+        + "却多了一次锁争用。故默认关闭，留作 B5 内容迁移后的复测开关（见 docs/09 §12）。"
+    )
+    public boolean areaLock = false;
+
     @PostProcess
     private void postProcess() {
         CeruLeanRegions.init(this);

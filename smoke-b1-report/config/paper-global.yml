@@ -35,6 +35,7 @@ block-updates:
   disable-noteblock-updates: false
   disable-tripwire-updates: false
 cerulean-regions:
+  area-lock: false
   grid-exponent: 4
   merge-radius: 2
   neighbourhood: SQUARE_3X3

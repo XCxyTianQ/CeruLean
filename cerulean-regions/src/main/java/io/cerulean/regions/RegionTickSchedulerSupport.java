@@ -1,6 +1,7 @@
 package io.cerulean.regions;
 
 import io.cerulean.regionizer.Region;
+import io.cerulean.regionizer.Section;
 
 /**
  * 区域 tick 体：两种调度器共用，保证"串行模式"与"EDF 模式"的**语义完全一致**，
@@ -19,6 +20,50 @@ final class RegionTickSchedulerSupport {
      */
     static boolean tickRegion(final CeruLeanRegions owner, final Region<RegionData> region,
                               final long ownerThreadId, final long gameTime) {
+        // ── B5.1（默认关闭）：先拿区块系统的**区域锁**，再进 TICKING ─────────────────
+        // 实测结论：对当前架构**无效**（被闸门抓到的路径不持有该锁），故默认关闭；
+        // 保留实现以便 B5 内容迁移之后复测。细节与数据见 docs/09 §12。
+        // 这保证"区块状态切换/票据调度"与"区域 tick"互斥（上游注释写明的约定），
+        // 从而把 B2 的"事后拒绝"升级为"事前互斥"。
+        // 锁序：区域锁 → Regionizer.lock（与区块系统一致：ticketLock → schedulingLock → Regionizer.lock）。
+        // **铁律**：持有区域锁期间绝不能阻塞等待主线程（否则与主线程互等死锁）——本 tick 体只做内存簿记。
+        final ca.spottedleaf.concurrentutil.lock.ReentrantAreaLock areaLock = owner.chunkSystemAreaLock();
+        ca.spottedleaf.concurrentutil.lock.ReentrantAreaLock.Node areaNode = null;
+        if (areaLock != null) {
+            final int shift = CeruLeanRegions.config().regionShift;
+            int minX = Integer.MAX_VALUE;
+            int minZ = Integer.MAX_VALUE;
+            int maxX = Integer.MIN_VALUE;
+            int maxZ = Integer.MIN_VALUE;
+            for (final Section<RegionData> section : region.sectionsSnapshot()) {
+                minX = Math.min(minX, section.x());
+                minZ = Math.min(minZ, section.z());
+                maxX = Math.max(maxX, section.x());
+                maxZ = Math.max(maxZ, section.z());
+            }
+            if (minX != Integer.MAX_VALUE) {
+                final long waitStart = System.nanoTime();
+                areaNode = areaLock.lock(minX << shift, minZ << shift,
+                        ((maxX + 1) << shift) - 1, ((maxZ + 1) << shift) - 1);
+                final long waited = System.nanoTime() - waitStart;
+                owner.areaLockNanos.addAndGet(waited);
+                if (waited > 1_000_000L) {
+                    owner.areaLockStalls.incrementAndGet();
+                }
+            }
+        }
+        try {
+            return tickRegionLocked(owner, region, ownerThreadId, gameTime);
+        } finally {
+            if (areaNode != null) {
+                areaLock.unlock(areaNode);
+            }
+        }
+    }
+
+    /** 区域锁内的 tick 体（原实现）。 */
+    private static boolean tickRegionLocked(final CeruLeanRegions owner, final Region<RegionData> region,
+                                            final long ownerThreadId, final long gameTime) {
         final var regionizer = owner.regionizer();
         if (!regionizer.tryMarkTicking(region, ownerThreadId)) {
             return false;                       // 已被并发吞并/销毁，或正忙
