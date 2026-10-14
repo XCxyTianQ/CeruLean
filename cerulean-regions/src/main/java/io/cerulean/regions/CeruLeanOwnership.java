@@ -109,18 +109,27 @@ public final class CeruLeanOwnership {
                 counter.incrementAndGet();
             };
 
-    /** 现场签名 = 第一个非本包/非反射的栈帧（抓栈只在首次见到该现场时发生）。 */
+    /**
+     * 现场签名 = 跳过本包 / JDK / **TickThread 自身**之后的第一个栈帧。
+     *
+     * <p>跳过 TickThread 是关键：闸门是从 {@code TickThread.isTickThreadFor} 的 11 个重载里被调用的，
+     * 只记到它本身只能告诉我们"是哪个重载"，记不到"**到底是谁在违规**"——
+     * 而后者才是 B5 的工作清单（例如 {@code NewChunkHolder.handleFullStatusChange}）。</p>
+     */
     private static String currentSite() {
         final StackTraceElement[] stack = new Throwable().getStackTrace();
         for (final StackTraceElement element : stack) {
             final String cls = element.getClassName();
-            if (cls.startsWith("io.cerulean.") || cls.startsWith("java.") || cls.startsWith("jdk.")) {
+            if (cls.startsWith("io.cerulean.") || cls.startsWith("java.") || cls.startsWith("jdk.")
+                    || cls.equals(TICK_THREAD_CLASS)) {
                 continue;
             }
             return cls + "." + element.getMethodName() + ":" + element.getLineNumber();
         }
         return "<unknown>";
     }
+
+    private static final String TICK_THREAD_CLASS = "ca.spottedleaf.moonrise.common.util.TickThread";
 
     /**
      * 端到端自检（诊断命令用）：把指定位置的区域临时绑定到一个**假线程 id**，

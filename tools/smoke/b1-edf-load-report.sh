@@ -23,13 +23,21 @@ open(path, "w", encoding="utf-8").write(s)
 PY
 }
 
-# 注意：配置文件要**先写好再起服**（否则第一轮跑的是上一轮的配置——我踩过这个坑）
-"$DIR/server-up.sh" "$JAR" "$OUT" >/dev/null
-set_cfg edf soft || true
-"$DIR/server-down.sh" "$OUT" >/dev/null
+# 第一次启动只为**生成配置文件**：新目录首启可能触发 Paper 的世界目录迁移（约 30 秒），
+# 必须等它跑完再停，否则世界会半迁移（表现为后续都是 "Overworld settings missing"）——踩过这个坑。
+"$DIR/server-up.sh" "$JAR" "$OUT" >/dev/null || true
+sleep 45
+"$DIR/server-down.sh" "$OUT" >/dev/null 2>&1 || true
 for OWN in soft strict; do
   set_cfg edf "$OWN"
-  "$DIR/server-up.sh" "$JAR" "$OUT" >/dev/null || { echo "OWN=$OWN SURVIVED=0（起服失败）"; continue; }
+  # 必须先停掉上一轮的进程，否则新配置不会生效（server-up 见到活 pid 会直接返回）——踩过这个坑
+  "$DIR/server-down.sh" "$OUT" >/dev/null 2>&1 || true
+  rm -f "$OUT/server.pid"
+  if ! "$DIR/server-up.sh" "$JAR" "$OUT" >/dev/null; then
+    echo "OWN=$OWN SURVIVED=0（起服失败）——控制台尾部："
+    tail -6 "$OUT/server-console.log" 2>/dev/null | sed 's/^/    /'
+    continue
+  fi
   echo "---- EDF + $OWN ----"
   CERULEAN_CONFIG="$CFG" python3 "$DIR/b2_load_probe.py" 2>&1 | tee "$OUT/load-$OWN.txt" || true
   [ -f "$OUT/server.pid" ] && kill -0 "$(cat "$OUT/server.pid")" 2>/dev/null || rm -f "$OUT/server.pid"

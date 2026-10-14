@@ -80,7 +80,11 @@ def main():
             m = re.search(r"将会违规 (\d+) 次 / 不同现场 (\d+) 个", ownership_line)
             if m:
                 violations, sites = int(m.group(1)), int(m.group(2))
-            print("  " + ownership_line.split("\n")[0][:160])
+            lines_out = [l.strip() for l in ownership_line.split("\n") if l.strip()]
+            print("  " + lines_out[0][:160])
+            # ★ B5 工作清单：按频次排序的违规现场
+            for extra in lines_out[1:9]:
+                print("     现场: " + extra[:150])
     print()
     print(f"MODE={mode} VIOLATIONS={violations} SITES={sites} "
           f"LOAD_SECONDS={load_seconds:.1f} SURVIVED={1 if survived else 0}")

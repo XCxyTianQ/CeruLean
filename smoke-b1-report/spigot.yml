@@ -13,10 +13,11 @@
 settings:
   debug: false
   bungeecord: false
-  moved-too-quickly-multiplier: 10.0
-  moved-wrongly-threshold: 0.0625
   save-user-cache-on-stop-only: false
+  moved-wrongly-threshold: 0.0625
+  moved-too-quickly-multiplier: 10.0
   sample-count: 12
+  player-shuffle: 0
   netty-threads: 4
   attribute:
     maxAbsorption:
@@ -32,7 +33,6 @@ settings:
   timeout-time: 60
   restart-on-crash: true
   restart-script: ./start.sh
-  player-shuffle: 0
   user-cache-size: 1000
 messages:
   whitelist: You are not whitelisted on this server!
@@ -48,18 +48,47 @@ advancements:
 world-settings:
   default:
     below-zero-generation-in-existing-chunks: true
-    view-distance: default
     simulation-distance: default
-    merge-radius:
-      exp: -1.0
-      item: 0.5
-    mob-spawn-range: 8
-    item-despawn-rate: 6000
-    nerf-spawner-mobs: false
-    arrow-despawn-rate: 1200
-    trident-despawn-rate: 1200
-    thunder-chance: 100000
-    unload-frozen-chunks: false
+    view-distance: default
+    max-tick-time:
+      tile: 50
+      entity: 50
+    seed-village: 10387312
+    seed-desert: 14357617
+    seed-igloo: 14357618
+    seed-jungle: 14357619
+    seed-swamp: 14357620
+    seed-monument: 10387313
+    seed-shipwreck: 165745295
+    seed-ocean: 14357621
+    seed-outpost: 165745296
+    seed-endcity: 10387313
+    seed-nether: 30084232
+    seed-mansion: 10387319
+    seed-fossil: 14357921
+    seed-portal: 34222645
+    seed-ancientcity: 20083232
+    seed-trailruins: 83469867
+    seed-trialchambers: 94251327
+    seed-abandonedcamp: 91231127
+    seed-buriedtreasure: 10387320
+    seed-mineshaft: default
+    seed-stronghold: default
+    seed-slime: 987234911
+    ticks-per:
+      hopper-transfer: 8
+      hopper-check: 1
+    hopper-amount: 1
+    hopper-can-load-chunks: false
+    max-tnt-per-tick: 100
+    hunger:
+      jump-walk-exhaustion: 0.05
+      jump-sprint-exhaustion: 0.2
+      combat-exhaustion: 0.1
+      regen-exhaustion: 6.0
+      swim-multiplier: 0.01
+      sprint-multiplier: 0.1
+      other-multiplier: 0.0
     entity-activation-range:
       animals: 32
       monsters: 32
@@ -86,45 +115,6 @@ world-settings:
       villagers-active-for-panic: true
       tick-inactive-villagers: true
       ignore-spectators: false
-    ticks-per:
-      hopper-transfer: 8
-      hopper-check: 1
-    hopper-amount: 1
-    hopper-can-load-chunks: false
-    seed-village: 10387312
-    seed-desert: 14357617
-    seed-igloo: 14357618
-    seed-jungle: 14357619
-    seed-swamp: 14357620
-    seed-monument: 10387313
-    seed-shipwreck: 165745295
-    seed-ocean: 14357621
-    seed-outpost: 165745296
-    seed-endcity: 10387313
-    seed-nether: 30084232
-    seed-mansion: 10387319
-    seed-fossil: 14357921
-    seed-portal: 34222645
-    seed-ancientcity: 20083232
-    seed-trailruins: 83469867
-    seed-trialchambers: 94251327
-    seed-abandonedcamp: 91231127
-    seed-buriedtreasure: 10387320
-    seed-mineshaft: default
-    seed-stronghold: default
-    seed-slime: 987234911
-    max-tick-time:
-      tile: 50
-      entity: 50
-    max-tnt-per-tick: 100
-    hunger:
-      jump-walk-exhaustion: 0.05
-      jump-sprint-exhaustion: 0.2
-      combat-exhaustion: 0.1
-      regen-exhaustion: 6.0
-      swim-multiplier: 0.01
-      sprint-multiplier: 0.1
-      other-multiplier: 0.0
     entity-tracking-range:
       players: 128
       animals: 96
@@ -132,6 +122,16 @@ world-settings:
       misc: 96
       display: 128
       other: 64
+    merge-radius:
+      item: 0.5
+      exp: -1.0
+    arrow-despawn-rate: 1200
+    trident-despawn-rate: 1200
+    item-despawn-rate: 6000
+    mob-spawn-range: 8
+    nerf-spawner-mobs: false
+    thunder-chance: 100000
+    unload-frozen-chunks: false
     growth:
       cactus-modifier: 100
       cane-modifier: 100
@@ -155,12 +155,12 @@ world-settings:
       cavevines-modifier: 100
       glowberry-modifier: 100
       pitcherplant-modifier: 100
-    enable-zombie-pigmen-portal-spawns: true
-    wither-spawn-sound-radius: 0
     zombie-aggressive-towards-villager: true
+    enable-zombie-pigmen-portal-spawns: true
+    end-portal-sound-radius: 0
+    wither-spawn-sound-radius: 0
     dragon-death-sound-radius: 0
     hanging-tick-frequency: 100
-    end-portal-sound-radius: 0
     verbose: false
 players:
   disable-saving: false
@@ -170,9 +170,9 @@ stats:
   forced-stats: {}
 commands:
   silent-commandblock-console: false
-  log: true
   tab-complete: 0
   send-namespaced: true
+  log: true
   spam-exclusions:
   - /skill
   replace-commands:

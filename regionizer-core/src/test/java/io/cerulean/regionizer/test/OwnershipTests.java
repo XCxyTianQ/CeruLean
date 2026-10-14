@@ -82,6 +82,36 @@ public final class OwnershipTests {
         final long aDeadline = 10_000_000_000L;
         t.eq("跨区域折算 deadline（tick 差 ×2）", aDeadline + 2 * period,
                 io.cerulean.regionizer.TickSchedule.transferDeadline(aDeadline, 100L, 102L));
+
+        // 合并继承：被吸收区域"更晚"⇒ 采用它的相位（TPS 不超 20）
+        final io.cerulean.regionizer.TickSchedule into = new io.cerulean.regionizer.TickSchedule();
+        final io.cerulean.regionizer.TickSchedule from = new io.cerulean.regionizer.TickSchedule();
+        into.setFirstStart(1_000_000_000L + period);        // nextStart = 1_050_000_000
+        from.setFirstStart(1_000_000_000L + 3 * period);    // nextStart = 1_150_000_000
+        into.adoptLaterOf(from, 0L);
+        t.eq("合并采用更晚的相位", 1_150_000_000L, into.nextStart());
+
+        // 合并继承：被吸收区域"更早"⇒ 保持自己的相位
+        final io.cerulean.regionizer.TickSchedule a2 = new io.cerulean.regionizer.TickSchedule();
+        final io.cerulean.regionizer.TickSchedule b2 = new io.cerulean.regionizer.TickSchedule();
+        a2.setFirstStart(1_000_000_000L + 3 * period);      // 更晚
+        b2.setFirstStart(1_000_000_000L + period);          // 更早
+        a2.adoptLaterOf(b2, 0L);
+        t.eq("合并后不因被吸收方更早而提前", 1_150_000_000L, a2.nextStart());
+
+        // 合并继承：必须按 tickOffset 折算（被吸收方的基准落后 2 个刻）
+        final io.cerulean.regionizer.TickSchedule a3 = new io.cerulean.regionizer.TickSchedule();
+        final io.cerulean.regionizer.TickSchedule b3 = new io.cerulean.regionizer.TickSchedule();
+        a3.setFirstStart(1_000_000_000L + period);          // nextStart = 1_050_000_000
+        b3.setFirstStart(1_000_000_000L + period);          // nextStart = 1_050_000_000（b3 的基准）
+        a3.adoptLaterOf(b3, 2L);                            // 折算后 = 1_050_000_000 + 2·period = 1_150_000_000
+        t.eq("合并继承按 tickOffset 折算", 1_150_000_000L, a3.nextStart());
+
+        // 分裂继承：新区域相位 = 源区域相位（不白等一个周期）
+        final io.cerulean.regionizer.TickSchedule split = new io.cerulean.regionizer.TickSchedule();
+        split.setFirstStart(999L);
+        split.adoptPhaseFrom(a3);
+        t.eq("分裂继承源区域相位", a3.nextStart(), split.nextStart());
     }
 
     public static void run(final T t) {

@@ -82,9 +82,50 @@ public final class TickSchedule {
         return next;
     }
 
+    /** 下一次应当开始的时刻（未设置时返回 {@link #DEADLINE_NOT_SET}）。 */
+    public long nextStart() {
+        return this.isSet() ? this.deadline(PERIOD_NS) : DEADLINE_NOT_SET;
+    }
+
+    /**
+     * 合并时**继承被吸收区域的时间表**（上游做法）。
+     *
+     * <p>两个要点：</p>
+     * <ol>
+     *   <li><b>折算</b>：被吸收区域的绝对 deadline 属于它自己的 tick 基准，必须用
+     *       {@code tickOffset = into.tickCount - from.tickCount} 折算到本区域基准
+     *       （工程研究 notes/12 §2.4：catch-up 让 gameTime 与区域 tick 分叉，不折算就错）；</li>
+     *   <li><b>取较晚者</b>：上游取"较大的时间延迟"以免合并后 TPS 超过 20
+     *       （两个区域刚合并时不该比原来更频繁地 tick）。</li>
+     * </ol>
+     */
+    public void adoptLaterOf(final TickSchedule other, final long tickOffsetPeriods) {
+        if (other == null || !other.isSet() || !this.isSet()) {
+            return;
+        }
+        final long transferred = transferDeadline(other.deadline(PERIOD_NS), 0L, tickOffsetPeriods);
+        final long ours = this.deadline(PERIOD_NS);
+        if (greater(transferred, ours)) {
+            this.lastPeriod = transferred - PERIOD_NS;      // 采用更晚的相位
+        }
+    }
+
+    /** 分裂时让新区域**继承源区域的相位**（否则新区域会白等一个周期）。 */
+    public void adoptPhaseFrom(final TickSchedule other) {
+        if (other == null || !other.isSet()) {
+            return;
+        }
+        this.lastPeriod = other.lastPeriod;
+    }
+
     /** 回绕安全的取大（用差值符号法，避免纳秒回绕时裸比较出错）。 */
     public static long greatest(final long a, final long b) {
         return (b - a) > 0L ? b : a;
+    }
+
+    /** 回绕安全的"a 是否晚于 b"。 */
+    public static boolean greater(final long a, final long b) {
+        return (a - b) > 0L;
     }
 
     /** 回绕安全的比较：a 是否早于 b。 */

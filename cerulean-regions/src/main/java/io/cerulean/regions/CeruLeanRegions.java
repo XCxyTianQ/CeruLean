@@ -282,11 +282,25 @@ public final class CeruLeanRegions {
 
         @Override
         public void mergeState(final RegionData from, final RegionData into, final long tickOffset) {
-            // C2：区域状态只有计数，合并时累加即可（tickOffset 的用法在 C3 的调度状态上验证）
             into.ticks += from.ticks;
             into.mergedAway += from.mergedAway;
             if (into.firstTickGameTime < 0L) {
                 into.firstTickGameTime = from.firstTickGameTime;
+            }
+            // B1：继承被吸收区域的时间表——① 用 tickOffset 把它的绝对 deadline 折算到本区域基准
+            //（catch-up 会让两者的 tick 计数分叉）；② 取**较晚**者，避免合并后 TPS 超过 20。
+            into.schedule.adoptLaterOf(from.schedule, tickOffset);
+            into.catchUpTicks += from.catchUpTicks;
+            into.totalTickNanos += from.totalTickNanos;
+        }
+
+        @Override
+        public void splitState(final RegionData from, final int regionShift,
+                               final java.util.Map<Long, RegionData> newDataByKey,
+                               final java.util.Collection<RegionData> newDataValues) {
+            // B1：分裂出的新区域**继承源区域的相位**，否则每个新区域都会白等一个周期。
+            for (final RegionData data : newDataValues) {
+                data.schedule.adoptPhaseFrom(from.schedule);
             }
         }
     }
