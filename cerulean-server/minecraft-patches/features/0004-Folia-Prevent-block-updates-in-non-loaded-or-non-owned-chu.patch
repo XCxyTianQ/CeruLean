@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Spottedleaf <Spottedleaf@users.noreply.github.com>
+Date: Mon, 17 Apr 2023 19:47:57 -0700
+Subject: [PATCH] Prevent block updates in non-loaded or non-owned chunks
+
+This is to prevent block physics from tripping thread checks by
+far exceeding the bounds of the current region. While this does
+add explicit block update suppression techniques, it's better
+than the server crashing.
+
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index a596cbc1109d72cc10247fb5f42b8c2d00ee7847..b1c2f90bd1b0ad55d0ed7a47d5eab1c09346bb50 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -2130,7 +2130,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     public void updateNeighbourForOutputSignal(final BlockPos pos, final Block changedBlock) {
+         for (Direction direction : Direction.Plane.HORIZONTAL) {
+             BlockPos relativePos = pos.relative(direction);
+-            if (this.hasChunkAt(relativePos)) {
++            if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(this, relativePos, 25) && this.hasChunkAt(relativePos)) { // Folia - block updates in unloaded chunks
+                 BlockState state = this.getBlockState(relativePos);
+                 if (state.is(Blocks.COMPARATOR)) {
+                     this.neighborChanged(state, relativePos, changedBlock, null, false);
+diff --git a/net/minecraft/world/level/block/DetectorRailBlock.java b/net/minecraft/world/level/block/DetectorRailBlock.java
+index ca39006eb2e0d9a334beaded79079d8458e0836c..5c0c90cf9184c71564a0213445401f27ff919af5 100644
+--- a/net/minecraft/world/level/block/DetectorRailBlock.java
++++ b/net/minecraft/world/level/block/DetectorRailBlock.java
+@@ -126,8 +126,8 @@ public class DetectorRailBlock extends BaseRailBlock {
+         RailState rail = new RailState(level, pos, state);
+ 
+         for (BlockPos connectionPos : rail.getConnections()) {
+-            BlockState connectionState = level.getBlockState(connectionPos);
+-            level.neighborChanged(connectionState, connectionPos, connectionState.getBlock(), null, false);
++            BlockState connectionState = !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(level, connectionPos, 25) ? null : level.getBlockStateIfLoaded(connectionPos); // Folia - block updates in unloaded chunks
++            if (connectionState != null) level.neighborChanged(connectionState, connectionPos, connectionState.getBlock(), null, false); // Folia - block updates in unloaded chunks
+         }
+     }
+ 
+diff --git a/net/minecraft/world/level/block/PoweredRailBlock.java b/net/minecraft/world/level/block/PoweredRailBlock.java
+index e6b32bfb66a7dad18d9d42abf833937796287780..61057af9e60b1d3ef926c01c90b03dfcf765a0e1 100644
+--- a/net/minecraft/world/level/block/PoweredRailBlock.java
++++ b/net/minecraft/world/level/block/PoweredRailBlock.java
+@@ -95,8 +95,8 @@ public class PoweredRailBlock extends BaseRailBlock {
+     }
+ 
+     protected boolean isSameRailWithPower(final Level level, final BlockPos pos, final boolean forward, final int searchDepth, final RailShape dir) {
+-        BlockState state = level.getBlockState(pos);
+-        if (!state.is(this)) {
++        BlockState state = !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(level, pos, 25) ? null : level.getBlockStateIfLoaded(pos);
++        if (state == null || !state.is(this)) { // Folia - block updates in unloaded chunks
+             return false;
+         }
+ 
+diff --git a/net/minecraft/world/level/block/RedstoneWireBlock.java b/net/minecraft/world/level/block/RedstoneWireBlock.java
+index 60ab4064a08f3050a72335ac4e1e599de4d417d6..92a174eb11521a68a1d2d65f6786ea4eea7438e5 100644
+--- a/net/minecraft/world/level/block/RedstoneWireBlock.java
++++ b/net/minecraft/world/level/block/RedstoneWireBlock.java
+@@ -208,8 +208,9 @@ public class RedstoneWireBlock extends Block {
+         BlockPos.MutableBlockPos blockPos = new BlockPos.MutableBlockPos();
+ 
+         for (Direction direction : Direction.Plane.HORIZONTAL) {
++            BlockState currState; blockPos.setWithOffset(pos, direction); // Folia - block updates in unloaded chunks
+             RedstoneSide value = state.getValue(PROPERTY_BY_DIRECTION.get(direction));
+-            if (value != RedstoneSide.NONE && !level.getBlockState(blockPos.setWithOffset(pos, direction)).is(this)) {
++            if (value != RedstoneSide.NONE && (currState = (level instanceof net.minecraft.server.level.ServerLevel serverLevel && !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(serverLevel, blockPos, 25) ? null : level.getBlockStateIfLoaded(blockPos))) != null && !currState.is(this)) { // Folia - block updates in unloaded chunks
+                 blockPos.move(Direction.DOWN);
+                 BlockState blockStateDown = level.getBlockState(blockPos);
+                 if (blockStateDown.is(this)) {
+diff --git a/net/minecraft/world/level/block/TripWireBlock.java b/net/minecraft/world/level/block/TripWireBlock.java
+index 51c5b039e5c4da0273077fe405ab1c3c377ceb23..c900efadb938e6d19d1d5c03b73adac82081c347 100644
+--- a/net/minecraft/world/level/block/TripWireBlock.java
++++ b/net/minecraft/world/level/block/TripWireBlock.java
+@@ -120,6 +120,7 @@ public class TripWireBlock extends Block {
+         for (Direction direction : new Direction[]{Direction.SOUTH, Direction.WEST}) {
+             for (int i = 1; i < 42; i++) {
+                 BlockPos testPos = pos.relative(direction, i);
++                if (!ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(level, testPos, 4)) break; // Folia - region threading
+                 BlockState block = level.getBlockState(testPos);
+                 if (block.is(this.hook)) {
+                     if (block.getValue(TripWireHookBlock.FACING) == direction.getOpposite()) {
+diff --git a/net/minecraft/world/level/block/TripWireHookBlock.java b/net/minecraft/world/level/block/TripWireHookBlock.java
+index b9090b80f9489431b11da29acf1f499e94c022ea..4448724198e08a528f1e5a5c45136dc331c36384 100644
+--- a/net/minecraft/world/level/block/TripWireHookBlock.java
++++ b/net/minecraft/world/level/block/TripWireHookBlock.java
+@@ -121,6 +121,7 @@ public class TripWireHookBlock extends Block {
+ 
+             for (int i = 1; i < 42; i++) {
+                 BlockPos testPos = pos.relative(direction, i);
++                if (!ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(level, testPos, 4)) return; // Folia - region threading
+                 BlockState wireState = level.getBlockState(testPos);
+                 if (wireState.is(Blocks.TRIPWIRE_HOOK)) {
+                     if (wireState.getValue(FACING) == direction.getOpposite()) {
+diff --git a/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java b/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
+index 4c3336fde3a82b8d41b47ade89e80add295940b2..16a0a789b930ec4fb92a03bc8f25e98053f0773a 100644
+--- a/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
++++ b/net/minecraft/world/level/redstone/CollectingNeighborUpdater.java
+@@ -149,7 +149,8 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+         public boolean runNext(final Level level) {
+             Direction direction = NeighborUpdater.UPDATE_ORDER[this.idx++];
+             BlockPos neighborPos = this.sourcePos.relative(direction);
+-            BlockState state = level.getBlockState(neighborPos);
++            BlockState state = !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(level, neighborPos, 25) ? null : level.getBlockStateIfLoaded(neighborPos); // Folia - block updates in unloaded chunks
++            if (state != null) { // Folia - block updates in unloaded chunks
+             Orientation orientation = null;
+             if (level.enabledFeatures().contains(FeatureFlags.REDSTONE_EXPERIMENTS)) {
+                 if (this.orientation == null) {
+@@ -162,6 +163,7 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+             }
+ 
+             NeighborUpdater.executeUpdate(level, state, neighborPos, this.sourceBlock, orientation, false, this.sourcePos); // Paper - Add source block to BlockPhysicsEvent
++            } // Folia - block updates in unloaded chunks
+             if (this.idx < NeighborUpdater.UPDATE_ORDER.length && NeighborUpdater.UPDATE_ORDER[this.idx] == this.skipDirection) {
+                 this.idx++;
+             }
+@@ -191,7 +193,9 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+     ) implements CollectingNeighborUpdater.NeighborUpdates {
+         @Override
+         public boolean runNext(final Level level) {
++            if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(level, this.pos, 25) && level.getChunkIfLoaded(this.pos) != null) { // Folia - block updates in unloaded chunks
+             NeighborUpdater.executeShapeUpdate(level, this.direction, this.pos, this.neighborPos, this.neighborState, this.updateFlags, this.updateLimit);
++            } // Folia - block updates in unloaded chunks
+             return false;
+         }
+ 
+@@ -204,8 +208,8 @@ public class CollectingNeighborUpdater implements NeighborUpdater {
+     private record SimpleNeighborUpdate(BlockPos pos, Block block, @Nullable Orientation orientation) implements CollectingNeighborUpdater.NeighborUpdates {
+         @Override
+         public boolean runNext(final Level level) {
+-            BlockState state = level.getBlockState(this.pos);
+-            NeighborUpdater.executeUpdate(level, state, this.pos, this.block, this.orientation, false);
++            BlockState state = !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(level, this.pos, 25) ? null : level.getBlockStateIfLoaded(this.pos); // Folia - block updates in unloaded chunks
++            if (state != null) NeighborUpdater.executeUpdate(level, state, this.pos, this.block, this.orientation, false); // Folia - block updates in unloaded chunks
+             return false;
+         }
+ 

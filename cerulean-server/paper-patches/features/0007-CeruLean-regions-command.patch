@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Thu, 16 Oct 2026 00:00:00 +0800
+Subject: [PATCH] CeruLean region diagnostics command (Folia base)
+
+---
+在 Folia 基座上注册收缩后的诊断命令 /cerulean（区域拓扑与调度概况）。
+走 Paper 命令 API（registerWithFlagsInternal），归属 CeruLean、命名空间 cerulean。
+---
+diff --git a/src/main/java/io/papermc/paper/command/PaperCommands.java b/src/main/java/io/papermc/paper/command/PaperCommands.java
+index 6216147..30a14ea 100644
+--- a/src/main/java/io/papermc/paper/command/PaperCommands.java
++++ b/src/main/java/io/papermc/paper/command/PaperCommands.java
+@@ -36,6 +36,11 @@ public final class PaperCommands {
+         //registerInternalCommand(PaperMSPTCommand.create(), "paper", PaperMSPTCommand.DESCRIPTION, List.of(), Set.of()); // Folia - region threading
+         registerInternalCommand(PaperVersionCommand.create(), "bukkit", PaperVersionCommand.DESCRIPTION, List.of("ver", "about"), Set.of());
+         registerInternalCommand(PaperPluginsCommand.create(), "bukkit", PaperPluginsCommand.DESCRIPTION, List.of("pl"), Set.of());
++        // CeruLean start - region diagnostics (Folia base)
++        io.papermc.paper.command.brigadier.PaperCommands.INSTANCE.registerWithFlagsInternal(
++            null, "cerulean", "CeruLean", io.cerulean.regions.CeruLeanCommand.create(),
++            io.cerulean.regions.CeruLeanCommand.DESCRIPTION, List.of(), Set.of());
++        // CeruLean end - region diagnostics
+     }
+ 
+     private static void registerInternalCommand(final LiteralCommandNode<CommandSourceStack> node, final String namespace, final String description, final List<String> aliases, final Set<CommandRegistrationFlag> flags) {

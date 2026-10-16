@@ -1,0 +1,81 @@
+{
+  "target": "127.0.0.1:25575",
+  "expect_mc": null,
+  "area": [
+    0,
+    0
+  ],
+  "cases": [
+    {
+      "case": "rcon_alive",
+      "status": "PASS",
+      "detail": "list -> 'There are 0 of a max of 5 players online:'"
+    },
+    {
+      "case": "version",
+      "status": "PASS",
+      "detail": "§fThis server is running Folia version 26.3-DEV-folia-base@f37ef02 (1970-01-01T00:00:00Z) "
+    },
+    {
+      "case": "setblock_data_nbt",
+      "status": "FAIL",
+      "detail": "data get -> 'Changed the block at 0, 100, 0Unknown or incomplete command. See below'"
+    },
+    {
+      "case": "impulse_redstone_trigger",
+      "status": "FAIL",
+      "detail": "目标方块未出现（命令方块未触发）"
+    },
+    {
+      "case": "auto_impulse(OBSERVED)",
+      "status": "OBSERVED",
+      "detail": "always-active 脉冲方块放置后**未自行执行**"
+    },
+    {
+      "case": "chain_executes_in_order(OBSERVED)",
+      "status": "OBSERVED",
+      "detail": "0/3 个链节点执行（见 docs/05-命令方块语义基线.md）"
+    },
+    {
+      "case": "chain_on_failure(OBSERVED)",
+      "status": "OBSERVED",
+      "detail": "前序失败后链**停止**"
+    },
+    {
+      "case": "scoreboard_roundtrip",
+      "status": "FAIL",
+      "detail": "get -> 'Unknown or incomplete command. See below for error\\nscoreboar'"
+    },
+    {
+      "case": "fill_region",
+      "status": "FAIL",
+      "detail": "3 格玻璃已铺"
+    },
+    {
+      "case": "clone_region",
+      "status": "FAIL",
+      "detail": "克隆到 +5 格处"
+    },
+    {
+      "case": "execute_if_conditional",
+      "status": "FAIL",
+      "detail": "条件成立时分数 -> 'Unknown or incomplete command. See below for error'"
+    },
+    {
+      "case": "tps_health(OBSERVED)",
+      "status": "OBSERVED",
+      "detail": "§x§4§f§a§4§f§0§lServer Health Report"
+    },
+    {
+      "case": "save_all_flush(OBSERVED)",
+      "status": "OBSERVED",
+      "detail": "Unknown or incomplete command. See below for error\nsave-all flush<--[H"
+    }
+  ],
+  "summary": {
+    "PASS": 2,
+    "FAIL": 6,
+    "OBSERVED": 5,
+    "ERROR": 0
+  }
+}
