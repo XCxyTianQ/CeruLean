@@ -115,6 +115,22 @@ poll('clone 同区域 · 真的拷到了', 'data get block 100 100 0 Command', l
 check('forceload 目标区域（相隔 ~1000 格）', 'forceload add 992 0 1008 16', lambda g: True)
 check('clone 跨区域', 'clone 96 100 0 96 100 0 1000 100 0', not_unknown)
 poll('clone 跨区域 · 真的拷到了', 'data get block 1000 100 0 Command', lambda g: 'say cloned' in g)
+# 跨维度（R2）：两跳搬运后必须真的能拷
+check('forceload nether 目标区域（execute in 切维度）',
+      'execute in minecraft:the_nether run forceload add 96 0 128 16',
+      lambda g: 'Unknown or incomplete' not in g)
+check('clone 跨维度 overworld → nether',
+      'clone 96 100 0 96 100 0 to minecraft:the_nether 100 100 0',
+      lambda g: 'Unknown or incomplete' not in g)
+poll('clone 跨维度 · 真的拷到了（nether 侧）',
+     'execute in minecraft:the_nether run data get block 100 100 0 Command',
+     lambda g: 'say cloned' in g)
+check('clone 跨维度 nether → overworld',
+      'clone from minecraft:the_nether 100 100 0 100 100 0 120 100 0',
+      lambda g: 'Unknown or incomplete' not in g)
+poll('clone 跨维度反向 · 真的拷到了（overworld 侧）',
+     'data get block 120 100 0 Command', lambda g: 'say cloned' in g)
+
 # 未加载/超限处必须仍是"业务响应"，不能退化成内部错误
 check('clone 未加载处（业务响应）',
       'clone 5000 100 0 5000 100 0 5001 100 0',
