@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Fri, 16 Oct 2026 17:19:28 +0800
+Subject: [PATCH] CeruLean clone: execute the copy body on the destination region owner
+
+---
+实测根因（docs/15 §T2）：RCON 命令在 **global region tick 线程**上执行，而
+  Level.getCurrentWorldData() == TickRegionScheduler.getCurrentRegionizedWorldData()
+只有"正在 tick 该 level 的区域线程"上非 null ⇒ Level.getBlockState 在
+  getCurrentWorldData().captureTreeGeneration
+处 NPE（栈：CloneCommands.clone:218 ← BlockInWorld.getState ← Level.getBlockState:1349）。
+
+处理（照上游 fill/setblock 的模板）：
+  * 参数解析期与纯数学检查（重叠、面积上限、hasChunksAt、isDebug）保持在调用线程——
+    实测这些不碰 getCurrentWorldData，不会炸；
+  * 真正的拷贝体抽成 cloneInOwningRegion(...)，整体用 AwaitableDispatch.dispatch 投递到
+    **目标位置所在区域**的拥有线程，命令立即返回占位值（与 fill 的 fire-and-forget 一致）；
+  * 拥有者本身就是调用方时（同区域命令方块）内联执行，异常照常传播；
+  * 投递路径里受检异常不能穿透 Runnable ⇒ 用 sendMessage 发给命令源（同 fill）。
+
+已知限制（诚实记录）：跨维度 clone（from 与 to 不同维度）在目标维度区域线程上读源维度方块，
+会命中 Level.getCurrentWorldData() 的 "World mismatch" 检查；本补丁不做多跳搬运，留待 T4 之后。
+---
+diff --git a/net/minecraft/server/commands/CloneCommands.java b/net/minecraft/server/commands/CloneCommands.java
+index 50d671b..7e64017 100644
+--- a/net/minecraft/server/commands/CloneCommands.java
++++ b/net/minecraft/server/commands/CloneCommands.java
+@@ -199,6 +199,47 @@ public class CloneCommands {
+             throw ERROR_FAILED.create();
+         }
+ 
++        // CeruLean start - 区域安全：真正的拷贝体整体投递到**目标位置所在区域**的拥有线程。
++        // 根因（实测栈，docs/15 §T2）：RCON 命令跑在 global region tick 线程上，而
++        // Level.getCurrentWorldData() 只在"正在 tick 该 level 的区域线程"上非 null ⇒
++        // Level.getBlockState 在 getCurrentWorldData().captureTreeGeneration 处 NPE。
++        // 照上游 fill/setblock 的模板：投递 + 立即返回占位结果，结果消息由拥有者线程发出。
++        if (io.cerulean.regions.AwaitableDispatch.owns(toDimension, destPos)) {
++            // 调用方本来就是拥有者（例如同区域命令方块）⇒ 内联，异常照常传播给 Brigadier
++            return cloneInOwningRegion(source, fromDimension, toDimension, from, destination, predicate, mode, strict);
++        }
++        io.cerulean.regions.AwaitableDispatch.dispatch(toDimension, destPos, () -> {
++            try {
++                cloneInOwningRegion(source, fromDimension, toDimension, from, destination, predicate, mode, strict);
++            } catch (final CommandSyntaxException ex) {
++                sendMessage(source, ex);
++            }
++        });
++        // 真实结果在拥有者线程上，由它自己 sendSuccess；这里与上游 fire-and-forget 一致地返回占位值。
++        return 1;
++        // CeruLean end
++    }
++
++    // CeruLean start - region threading
++    private static void sendMessage(CommandSourceStack src, CommandSyntaxException ex) {
++        src.sendFailure((Component)ex.getRawMessage());
++    }
++    // CeruLean end - region threading
++
++    /**
++     * CeruLean：真正的拷贝体。**必须在目标位置所在区域的拥有线程上调用**——它读写方块状态、
++     * 方块实体与方块刻，全都依赖 {@code Level.getCurrentWorldData()} 非 null。
++     */
++    private static int cloneInOwningRegion(
++        final CommandSourceStack source,
++        final ServerLevel fromDimension,
++        final ServerLevel toDimension,
++        final BoundingBox from,
++        final BoundingBox destination,
++        final Predicate<BlockInWorld> predicate,
++        final CloneCommands.Mode mode,
++        final boolean strict
++    ) throws CommandSyntaxException {
+         List<CloneCommands.CloneBlockInfo> solidList = Lists.newArrayList();
+         List<CloneCommands.CloneBlockInfo> blockEntitiesList = Lists.newArrayList();
+         List<CloneCommands.CloneBlockInfo> otherBlocksList = Lists.newArrayList();

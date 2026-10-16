@@ -46,7 +46,21 @@ public final class CeruLeanCommand {
                 .then(Commands.argument("chunkX", IntegerArgumentType.integer())
                     .then(Commands.argument("chunkZ", IntegerArgumentType.integer())
                         .executes(CeruLeanCommand::regionAt))))
+            .then(Commands.literal("dispatch")
+                .executes(CeruLeanCommand::dispatchStats))
             .build();
+    }
+
+    /**
+     * {@code /cerulean dispatch}：投递原语的自检快照（T3 验收用）。
+     *
+     * <p>要看的是 {@code callBlocking}——那是唯一还会阻塞调用方的地方，且只应该由
+     * {@code data get} 这类"命令契约要求同步返回值"的读取产生；写路径走
+     * {@code dispatch()}，投递即返回，不该在这里涨。</p>
+     */
+    private static int dispatchStats(final CommandContext<CommandSourceStack> context) {
+        context.getSource().getSender().sendMessage(Component.text("CeruLean 投递自检\n  " + AwaitableDispatch.stats()));
+        return 1;
     }
 
     /** {@code /cerulean regions}：调度线程数 + 每 world 的区域数与段参数。 */
