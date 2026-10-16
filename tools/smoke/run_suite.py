@@ -12,14 +12,25 @@
 用法：
     python3 tools/smoke/run_suite.py [--jar <path>]
 """
+import glob
 import os
 import subprocess
 import sys
 import time
 
-JAR = 'cerulean-server/build/libs/cerulean-paperclip-26.3.local-SNAPSHOT.jar'
-if '--jar' in sys.argv:
-    JAR = sys.argv[sys.argv.index('--jar') + 1]
+def resolve_jar(explicit=None):
+    """按 glob 找最新的 paperclip jar —— **不要写死文件名**：版本串随 channel 变
+    （本期 26.3-SNAPSHOT），写死会在换版本时静默指向旧产物。"""
+    if explicit:
+        return explicit
+    cands = glob.glob('cerulean-server/build/libs/*paperclip*.jar')
+    if not cands:
+        raise SystemExit('找不到 paperclip jar：先跑 tools/gradle-local.sh :cerulean-server:createPaperclipJar')
+    return max(cands, key=os.path.getmtime)
+
+
+JAR = resolve_jar(sys.argv[sys.argv.index('--jar') + 1] if '--jar' in sys.argv else None)
+print(f'== 使用 jar：{JAR}')
 RUN = './smoke-suite'
 ENV = dict(os.environ, CERULEAN_EULA='TRUE', RCON_PORT='25575', RCON_PASSWORD='test1234')
 PY = sys.executable

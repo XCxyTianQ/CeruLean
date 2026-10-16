@@ -6,13 +6,25 @@
 用法：
     python3 tools/smoke/exp_chain_acceptance.py [jar] [rundir]
 """
+import glob
 import os
 import re
 import subprocess
 import sys
 import time
 
-JAR = sys.argv[1] if len(sys.argv) > 1 else 'cerulean-server/build/libs/cerulean-paperclip-26.3.local-SNAPSHOT.jar'
+def _resolve_jar(explicit=None):
+    """按 glob 找最新 paperclip jar（版本串会随 channel 变，不要写死文件名）。"""
+    if explicit:
+        return explicit
+    import glob
+    cands = glob.glob('cerulean-server/build/libs/*paperclip*.jar')
+    if not cands:
+        raise SystemExit('找不到 paperclip jar：先跑 :cerulean-server:createPaperclipJar')
+    return max(cands, key=os.path.getmtime)
+
+
+JAR = _resolve_jar(sys.argv[1] if len(sys.argv) > 1 else None)
 RUN = sys.argv[2] if len(sys.argv) > 2 else './smoke-exp'
 CONF = os.path.join(RUN, 'azurebranches_global_config.toml')
 ENV = dict(os.environ, CERULEAN_EULA='TRUE', RCON_PORT='25575', RCON_PASSWORD='test1234')

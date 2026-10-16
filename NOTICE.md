@@ -31,7 +31,12 @@ CeruLean Cores（下称"本项目"）是一个 Minecraft 服务端发行版。�
 - 原「自研区域化」路线（Phase 2，设计规格见 [docs/06-区域化设计规格.md](docs/06-区域化设计规格.md)）
   已按路线 A 收缩掉：上游 Folia 已提供 `ThreadedRegionizer` / `TickRegionScheduler` / region-aware `TickThread`，
   `cerulean-regions` 现在只剩只读诊断命令与 EXP 链支撑库；
-- `study/folia/src/` 仍是**阅读用参考副本**，不参与构建。
+- `study/folia/src/` 仍是**阅读用参考副本**，不参与构建；
+- **版本通道**：本期（2026-10-16 起）服务端核心为 **Snapshot**（`gradle.properties` 的
+  `channel=SNAPSHOT`），版本串 `26.3-SNAPSHOT` / 发布构建 `26.3-build.<N>-SNAPSHOT`，
+  按 **pre-release** 发布（`--prerelease --latest=false`，不会被标成 Latest）。
+  发布前必须通过本仓库的分层验收套件（L0/L1/L2）。约定与实测见
+  [docs/18-版本与发布约定.md](docs/18-版本与发布约定.md)。
 
 ## 5. 图标
 

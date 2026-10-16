@@ -6,12 +6,20 @@
   <p>
     <code>Minecraft 26.3</code> · <code>Java 25</code> · <code>GPLv3</code> · 构建形态：paperweight patch-only fork
   </p>
+  <p>
+    <b>本期版本：<code>26.3-SNAPSHOT</code>（Snapshot，按 pre-release 发布，不建议用于生产）</b><br>
+    发布 tag 约定 <code>v26.3-build.N</code> · 详见 <a href="docs/18-版本与发布约定.md">docs/18</a>
+  </p>
 </div>
 
 ---
 
 ## 这是什么
 
+> **⚠️ 版本通道（本期）**：服务端核心为 **Snapshot**（`channel=SNAPSHOT`），
+> 版本串 `26.3-SNAPSHOT`（发布构建 `26.3-build.<N>-SNAPSHOT`），**按 GitHub pre-release 发布**
+> 且不会被标成 Latest。发布链路的验收闸门就是本仓库自己的分层套件。见 [docs/18](docs/18-版本与发布约定.md)。
+>
 > **⚠️ 基座身份变更（2026-10-16）**：本项目基座已从 **Paper 主线** 换成 **Folia 26.3**。
 > 区域化运行时不再自研（原 B1/B2/C2 路线已按路线 A 收缩掉，`cerulean-regions` 只剩诊断命令）；
 > 上游 Folia 已提供 `ThreadedRegionizer` / `TickRegionScheduler` / region-aware `TickThread`。

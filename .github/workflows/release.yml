@@ -1,0 +1,185 @@
+name: Release (Snapshot pre-release)
+
+# 本期服务端核心版本是 **Snapshot**（`gradle.properties` 的 `channel=SNAPSHOT`），
+# 因此发布一律走 GitHub **pre-release**：`--prerelease` + `--latest=false`。
+#
+# 触发方式（二选一）：
+#   1) 推 tag：`v<mcVersion>-build.<N>`，例如 v26.3-build.7
+#      ⇒ 工作流把 N 作为 BUILD_NUMBER 传给 Gradle，版本串成为 26.3-build.7-SNAPSHOT
+#   2) 手工 workflow_dispatch，填 build_number（会以当前提交为 target 建同名 tag）
+#
+# 发布前必须过闸：**分层验收套件全绿**（L0/L1/L2）。套件里任何一项 FAIL 都不发。
+on:
+  push:
+    tags:
+      - "v*-build.*"
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: "构建号 N（对应 tag v<mcVersion>-build.<N>）"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 验收 + 建 pre-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    permissions:
+      contents: write # gh release create 需要
+    env:
+      # patcher 用 `git am` 应用特性补丁并创建提交，必须有提交者身份
+      GIT_AUTHOR_NAME: CeruLean Build
+      GIT_AUTHOR_EMAIL: build@cerulean.local
+      GIT_COMMITTER_NAME: CeruLean Build
+      GIT_COMMITTER_EMAIL: build@cerulean.local
+      CERULEAN_EULA: "TRUE"
+      RCON_PORT: "25575"
+      RCON_PASSWORD: "test1234"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # paperweight 的 checkoutPaperRepo 要在 git 里按 paperRef 取上游对象
+          fetch-depth: 0
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 解析并校验版本（本期必须是 SNAPSHOT）
+        id: ver
+        run: |
+          set -e
+          mc_version=$(grep -E '^mcVersion=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
+          channel=$(grep -E '^channel=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
+          echo "mcVersion=$mc_version channel=$channel"
+
+          if [ "$channel" != "SNAPSHOT" ]; then
+            echo "::error::本期按 Snapshot / pre-release 发布，但 gradle.properties 的 channel='$channel'。"
+            echo "::error::若确实要转正式版，请改本工作流（去掉 --prerelease/--latest=false）后再改 channel。"
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            build_number="${{ inputs.build_number }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            build_number="${tag##*.}"
+          fi
+          case "$build_number" in
+            ''|*[!0-9]*) echo "::error::构建号必须是数字，得到 '$build_number'"; exit 1 ;;
+          esac
+
+          tag="v${mc_version}-build.${build_number}"
+          if [ "${{ github.event_name }}" = "push" ] && [ "$tag" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' 与 gradle.properties 的 mcVersion 不一致（应为 '$tag'）"
+            exit 1
+          fi
+
+          version="${mc_version}-build.${build_number}-${channel}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "BUILD_NUMBER=${build_number}" >> "$GITHUB_ENV"
+          echo "版本串将是：$version"
+
+      - name: 配置 Git 身份（与 job env 双保险）
+        run: |
+          git config --global user.email "build@cerulean.local"
+          git config --global user.name "CeruLean Build"
+
+      - name: 拉取上游 + 应用补丁
+        run: ./gradlew applyAllPatches --stacktrace
+
+      - name: 编译
+        run: ./gradlew build --stacktrace
+
+      - name: 产出 Paperclip 分发 jar
+        run: ./gradlew :cerulean-server:createPaperclipJar --stacktrace
+
+      - name: 校验产物版本串（必须带 -SNAPSHOT）
+        id: artifact
+        run: |
+          set -e
+          jar=$(ls cerulean-server/build/libs/*paperclip*.jar | head -1)
+          [ -f "$jar" ] || { echo "::error::找不到 paperclip jar"; exit 1; }
+          echo "产物：$jar"
+          case "$jar" in
+            *"-SNAPSHOT.jar") ;;
+            *) echo "::error::产物名不含 -SNAPSHOT，说明 channel 与版本串不一致：$jar"; exit 1 ;;
+          esac
+          # Specification-Version 来自 project.version，是"这一版是什么"的更直接证据
+          unzip -p cerulean-server/build/libs/cerulean-server-*.jar META-INF/MANIFEST.MF \
+            | grep -E "Implementation-Version|Specification-Version|Brand-(Id|Name)" || true
+          echo "jar=$jar" >> "$GITHUB_OUTPUT"
+          sha256sum "$jar" | tee "$jar.sha256"
+
+      - name: ★ 发布闸门：分层验收套件（L0/L1/L2）
+        run: |
+          chmod +x tools/smoke/*.sh
+          python3 tools/smoke/run_suite.py --jar "${{ steps.artifact.outputs.jar }}"
+
+      - name: 上传构建产物（便于追溯）
+        uses: actions/upload-artifact@v4
+        with:
+          name: cerulean-snapshot-${{ steps.ver.outputs.version }}
+          path: |
+            ${{ steps.artifact.outputs.jar }}
+            ${{ steps.artifact.outputs.jar }}.sha256
+          if-no-files-found: error
+
+      - name: 建 GitHub pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          tag="${{ steps.ver.outputs.tag }}"
+          version="${{ steps.ver.outputs.version }}"
+          jar="${{ steps.artifact.outputs.jar }}"
+
+          # 注意：这里**不能用 shell heredoc** —— 在 YAML 的 `run: |` 字面块里，
+          # heredoc 的终止符必须顶格，而顶格会提前结束该 YAML 块。用 echo 逐行拼。
+          {
+            echo "**本期服务端核心版本为 Snapshot（\`channel=SNAPSHOT\`），按 pre-release 发布，不建议用于生产。**"
+            echo
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 版本串 | \`${version}\` |"
+            echo "| 基座 | Folia / Minecraft \`$(grep -E '^mcVersion=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')\` |"
+            echo "| 上游 pin | \`$(grep -E '^paperRef=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')\` |"
+            echo "| 产物 | \`$(basename "$jar")\` |"
+            echo "| SHA-256 | \`$(cut -d' ' -f1 "$jar.sha256")\` |"
+            echo "| 提交 | \`${GITHUB_SHA}\` |"
+            echo
+            echo "### 本次发布前跑过的验收"
+            echo
+            echo "分层验收套件 \`tools/smoke/run_suite.py\` 全绿才会走到这一步："
+            echo "L0 基座活性 / L1 可观测面 / L2 用例（scoreboard+clone、EXP 链 SAFE+EXP 两轮、scoreboard 压力、存档往返）。"
+            echo "详见 \`docs/14\`–\`docs/18\`。"
+            echo
+            echo "### 已知限制（Snapshot 期如实声明）"
+            echo
+            echo "- EXP 命令方块链为 **EXP v2 语义**；OCC 读集校验/回滚重试/EXP6Plus 链屏障未移植（上游为构建期注入，依赖本项目没有的 \`RegionCommandExecutor\`）。"
+            echo "- 同步跨区域读取（\`data get\` 等）要求 Folia 调度器 **≥2 个线程**，否则自锁；套件在前提不满足时记「未验证」而非通过。"
+            echo "- 链的挂起/恢复路径需要 ≥2 个区域才能构造，当前冒烟环境为单区域。"
+          } > notes.md
+          echo "--- release notes ---"; cat notes.md
+
+          # 手工触发时 tag 可能还不存在，用当前提交建它
+          if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            gh release create "$tag" --target "$GITHUB_SHA" \
+              --title "${version}" --notes-file notes.md \
+              --prerelease --latest=false "$jar" "$jar.sha256"
+          else
+            gh release create "$tag" \
+              --title "${version}" --notes-file notes.md \
+              --prerelease --latest=false "$jar" "$jar.sha256"
+          fi
