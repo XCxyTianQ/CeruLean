@@ -181,28 +181,6 @@ tools/verify/cerulean-verify selftest --version 26.3
 tools/verify/cerulean-verify diff <jarA> <jarB>
 ```
 
-## 文档
-
-**当前有效**
-
-| 文档 | 内容 |
-|---|---|
-| [docs/14-交接待办.md](docs/14-交接待办.md) | T1–T7 清单与完成状态（含"三步法：安全复活一条被下架的命令"） |
-| [docs/15-T1T2T3-验收记录.md](docs/15-T1T2T3-验收记录.md) | 命令复活的第一批：`data`/`scoreboard`/`clone`，以及**二级根因**（区域 tick 上下文） |
-| [docs/16-T4-EXP链移植记录.md](docs/16-T4-EXP链移植记录.md) | EXP 链移植：三条硬前置、移植方式、验收判别器、已知限制 |
-| [docs/17-R1R2-并发与跨区域记录.md](docs/17-R1R2-并发与跨区域记录.md) | Scoreboard 并发加固、clone 两跳、**调度线程自锁**的实测根因与防护 |
-| [docs/18-版本与发布约定.md](docs/18-版本与发布约定.md) | 版本串的唯一来源、发布链路、离线等价校验清单 |
-| [docs/12-Folia基座分诊记录.md](docs/12-Folia基座分诊记录.md) / [docs/13-EXP链移植到26.3-可行性.md](docs/13-EXP链移植到26.3-可行性.md) | 切基座时的分诊与可行性评估 |
-| [docs/00-立项与约束.md](docs/00-立项与约束.md) · [01](docs/01-上游层叠与pin策略.md) · [02](docs/02-复现校验手册.md) · [03](docs/03-构建接入.md) · [05](docs/05-命令方块语义基线.md) | 定位与硬约束、pin 策略、复现校验、构建接入、命令方块语义基线 |
-
-**历史文档**（记录已被取代的路线，保留以便追溯决策，**不要据此实现**）：
-[docs/06-区域化设计规格.md](docs/06-区域化设计规格.md)（自研区域化设计）、
-[docs/07](docs/07-C2-MC接线.md) / [08](docs/08-C2-验收记录.md) / [09](docs/09-C3-计划.md) / [10](docs/10-B2-测试报告.md)
-（C2/C3/B2 阶段的接线、验收与计划）、
-[docs/Phase2-区域化移植路线.md](docs/Phase2-区域化移植路线.md)、
-[docs/EXP链移植可行性分析.md](docs/EXP链移植可行性分析.md)（基于 Paper 主线的早期分析，结论已被 docs/13 更新）。
-`study/` 下的阅读笔记是当时对 Folia 源码的学习记录，仍然有效。
-
 ## 与上游的关系
 
 - 构建形态与 [PaperMC/Folia](https://github.com/PaperMC/Folia) 相同（paperweight patch-only fork），
