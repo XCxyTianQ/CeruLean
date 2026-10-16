@@ -8,7 +8,7 @@ name: Release (Snapshot pre-release)
 #      ⇒ 工作流把 N 作为 BUILD_NUMBER 传给 Gradle，版本串成为 26.3-build.7-SNAPSHOT
 #   2) 手工 workflow_dispatch，填 build_number（会以当前提交为 target 建同名 tag）
 #
-# 发布前必须过闸：**分层验收套件全绿**（L0/L1/L2）。套件里任何一项 FAIL 都不发。
+# 本工作流**只构建 + 发布**，不跑验收套件（原因见下方第 125 行附近与 docs/18）。
 on:
   push:
     tags:
@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   release:
-    name: 验收 + 建 pre-release
+    name: 构建 + 建 pre-release
     runs-on: ubuntu-latest
     timeout-minutes: 300
     permissions:
@@ -122,11 +122,13 @@ jobs:
           echo "jar=$jar" >> "$GITHUB_OUTPUT"
           sha256sum "$jar" | tee "$jar.sha256"
 
-      - name: ★ 发布闸门：分层验收套件（L0/L1/L2）
-        run: |
-          chmod +x tools/smoke/*.sh
-          python3 tools/smoke/run_suite.py --jar "${{ steps.artifact.outputs.jar }}"
-
+      # ⚠️ 这里**不再**跑验收套件当发布闸门（2026-10-16 实测后移除）。
+      #   原因：L2 用例有环境前提（Folia 调度器 ≥2 线程 / ≥2 区域），GitHub runner 上不成立，
+      #   套件会 SKIP 或 FAIL（"调度器线程数 < 2"），闸门变成噪声而不是信号。
+      #   本工作流只负责"构建 + 发布"；**验收由发布者在开发机上本地跑**：
+      #       python3 tools/smoke/run_suite.py
+      #   也可以完全绕开 CI，本地构建后直接推送（含一个代理坑，见 docs/18 §3.2）：
+      #       gh release create v<mcVersion>-build.<N> --prerelease --latest=false ...
       - name: 上传构建产物（便于追溯）
         uses: actions/upload-artifact@v4
         with:
@@ -159,10 +161,10 @@ jobs:
             echo "| SHA-256 | \`$(cut -d' ' -f1 "$jar.sha256")\` |"
             echo "| 提交 | \`${GITHUB_SHA}\` |"
             echo
-            echo "### 本次发布前跑过的验收"
+            echo "### 关于验收"
             echo
-            echo "分层验收套件 \`tools/smoke/run_suite.py\` 全绿才会走到这一步："
-            echo "L0 基座活性 / L1 可观测面 / L2 用例（scoreboard+clone、EXP 链 SAFE+EXP 两轮、scoreboard 压力、存档往返）。"
+            echo "本工作流**只构建与发布**，不跑验收。分层验收套件 \`tools/smoke/run_suite.py\` 是**本地闸门**："
+            echo "L2 用例要求 Folia 调度器 ≥2 个线程 / ≥2 个区域，CI runner 上不成立，故不放入 CI。发布者应在开发机上跑完再打 tag。"
             echo "详见 \`docs/14\`–\`docs/18\`。"
             echo
             echo "### 已知限制（Snapshot 期如实声明）"
