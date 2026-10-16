@@ -2,7 +2,7 @@
   <img src="assets/icon.png" width="200" alt="CeruLean Cores">
   <h1>CeruLean Cores</h1>
   <p><b>面向「半投入生产」的 Minecraft 服务端发行版</b><br>
-  以 Folia 26.3 为基座 · 区域化并行 tick · 目标：区域化下的命令方块语义完整性</p>
+  以 Folia 26.3 为基座 · 补上区域化之下被牺牲掉的跨区域游戏语义</p>
   <p>
     <code>Minecraft 26.3</code> · <code>Java 25</code> · <code>GPLv3</code> · 构建形态：paperweight patch-only fork
   </p>
@@ -16,59 +16,87 @@
 
 ## 这是什么
 
-> **⚠️ 版本通道（本期）**：服务端核心为 **Snapshot**（`channel=SNAPSHOT`），
-> 版本串 `26.3-SNAPSHOT`（发布构建 `26.3-build.<N>-SNAPSHOT`），**按 GitHub pre-release 发布**
-> 且不会被标成 Latest。发布链路的验收闸门就是本仓库自己的分层套件。见 [docs/18](docs/18-版本与发布约定.md)。
->
-> **⚠️ 基座身份变更（2026-10-16）**：本项目基座已从 **Paper 主线** 换成 **Folia 26.3**。
-> 区域化运行时不再自研（原 B1/B2/C2 路线已按路线 A 收缩掉，`cerulean-regions` 只剩诊断命令）；
-> 上游 Folia 已提供 `ThreadedRegionizer` / `TickRegionScheduler` / region-aware `TickThread`。
-> 当前进度与验收记录见 `docs/14`（T1–T7 交接）、`docs/15`（T1–T3）、`docs/16`（T4）、`docs/17`（R1/R2）。
-> **下文 §"为什么自己做区域化" 属历史路线，已被上述变更取代，保留以便追溯决策。**
+CeruLean Cores 是一个 Minecraft Java 版服务端发行版，**基座是 [Folia](https://github.com/PaperMC/Folia) 26.3**。
 
+它不是在问"区域化怎么做"——那件事上游已经做完了。它问的是**下一个问题**：
 
-CeruLean Cores 是一个 Minecraft Java 版服务端发行版。它**不是**又一个"加了一堆优化补丁"的 Paper 下游，而是想解决一个具体而难的问题：
+> 世界被切成多个区域、每个区域在自己的线程上独立推进 tick 之后，
+> **那些天生要跨越区域的游戏语义**（最典型的是命令方块链）**还剩多少？怎么补回来？**
 
-> **当世界被切成多个区域、每个区域在自己的线程上独立推进 tick 时，跨区域的游戏语义（尤其是命令方块链）如何保持正确。**
+Folia 对这个问题的回答是**取舍**：关掉、或者不注册那些无法保证区域安全的入口。
+CeruLean 的回答是**把它们做成区域安全的再放开**。本仓库的主要内容就是这件事的施工记录与验收证据。
 
-为此本项目的路线是：**以 Paper 主线为基座**（拿到它已经具备的区块系统与新调度 API），**自己实现区域化**（而不是直接跟随 Folia 分支），并在其之上重建命令方块语义保障层。
+## 与上游的分工
 
-## 为什么自己做区域化
-
-| 事实（均经实测核对） | 含义 |
+| | 由谁提供 |
 |---|---|
-| Folia 上游**没有 `ver/26.3.x` 分支**；26.2 只有 6 个 BETA 构建，最后一次功能性提交停留在 2026-08-25 | 跟随 Folia 分支 = 把路线图交给一个停摆的上游 |
-| Paper 主线**已包含** Moonrise 区块系统（309 个类）、`TickThread`、Folia 调度 API 面（含回退实现），且 `TickRegions` 里留着 `// placeholder class for Folia` | 区域化最难的几块**不用自己写**，上游甚至为 Folia 预留了坑位 |
-| 主线**0 命中** `RegionizedServer` / `ThreadedRegionizer` | 真正要自己做的：区域执行体 + 跨区域语义 + 生产加固 |
-| 上游对"区块生命周期 → 区域拓扑"的连接点只有 **1 个文件 2 行**（Moonrise 的 `BaseChunkSystemHooks`） | 接入面很窄，自研是可控的 |
-| 区域化补丁的 **84.8%（26.1.2→26.3）/ 75.8%（26.2→26.3）hunk** 落在 Paper 已改动的文件上 | 直接搬运上游补丁是"移植工程"而非 rebase；这也是选择自研的理由之一 |
+| 区域化运行时：`ThreadedRegionizer` / `TickRegionScheduler` / region-aware `TickThread` / `RegionizedServer` 与区域任务队列 / region profiler / watchdog | **Folia 26.3 上游**（补丁已 vendor 进本仓库为 `0001`–`0011`） |
+| 区块系统、Moonrise、构建形态（paperweight patch-only fork） | **Paper 主线**（由 `gradle.properties` 的 `paperRef` 锁定） |
+| **被 Folia 为区域安全而下架的入口，重新做成区域安全后放开** | **本项目**（补丁 `0012` 起） |
+| **跨区域投递原语、并发加固、可挂起命令方块链（EXP）** | **本项目** |
+| **分层验收套件（同时是发布闸门）** | **本项目** |
+
+具体补了什么（每一条都有实测验收记录，见文末文档索引）：
+
+- **命令层复活**。Folia 把 `data` / `scoreboard` / `clone` 的注册注释掉了（`Commands.java` 里的 TODO）。
+  本项目的做法是先找出真正的约束——**世界访问必须发生在"正在 tick 该 level 的区域线程"上**
+  （`Level.getCurrentWorldData()` 在别的线程上返回 `null`，在别的维度的区域线程上抛 `World mismatch`）——
+  再把世界访问整体推迟进投递体。`clone` 还额外做了**两跳**（源区域读 → 目标区域写）与**方块刻快照**，
+  因此跨区域与**跨维度**都能真的拷到位。
+- **投递原语** `AwaitableDispatch`：`dispatch()` 非阻塞（写路径一律用它）、`call()` 有界等待
+  （只有"命令契约要求同步返回值"的读取才用）。并实测出一个结构性隐患并做了防护：
+  **当 Folia 调度器只有 1 个线程时，global region 与目标区域跑在同一线程上，同步等待等于等自己**——
+  现在会快速失败并给出可诊断的错误，而不是把 global region 拖停到触发 watchdog。
+- **并发加固**。`Scoreboard` 是跨区域共享、本来没有任何同步的容器，而它在放开命令**之前**
+  就已经被区域线程写了（`ServerPlayer.awardStat/awardKillScore/handleTeamKill/…`）。已换成并发容器
+  并加一把只保护复合操作的稀疏锁（通知移到锁外，热读不上锁）。
+- **可挂起命令方块链（EXP）**——见下一节。
+
+## EXP 链是什么
+
+Folia 把命令方块**整个关掉**了：`BaseCommandBlock.performCommand` 的第一行就是
+`if (true) return false;`。理由很直接——一条命令方块链是**跨区域的连续动作**（一块执行完接着下一块），
+而那块方块完全可能属于别的区域。
+
+**EXP 链**（本项目的命名，来自上一代项目）把这条链当作一段**可挂起、可恢复的事务**来处理：
+
+```
+walk 沿链前进
+  └─ 遇到需要跨区域完成的动作（例如 setblock 到别的区域）
+        → 登记为延迟工作，攒进"按目标区域分组"的批次
+        → 到批边界（条件块 / 批次上限 / 链尾）**挂起**：
+          存下 Continuation（光标位置、朝向、剩余步数、阶段快照）
+        → 派发到各目标区域执行
+        → 全部完成后回 home 区域**恢复**，从断点继续走
+```
+
+这样"链"在语义上仍然是连续的一条，而每一步都发生在正确的区域线程上。
+配置开关是 `command_blocks.mode`：`SAFE`（默认，保持 Folia 的禁用行为）/ `ACCESS` / `EXP`。
+
+**EXP 的完整实现与演进史在另一个仓库：[XCxyTianQ/AzureBranches](https://github.com/XCxyTianQ/AzureBranches)**
+——那是同作者的上一代项目（Folia 26.1.2 基座），经历了 13 站演进（EXP5Plus → EXP7，含自研存储引擎）。
+上代项目里 EXP 的**协议状态作用域（OCC）**部分是构建期注入的 554 行，依赖本仓库没有的
+`RegionCommandExecutor`；**OCC 在本期明确排除**，因此本项目目前实现的是 **EXP v2 语义**
+（挂起/恢复 + 阶段快照 + 批边界派发），验收口径也相应地窄于上代项目的 `exp6/exp6plus` 用例。
 
 ## 当前状态
 
-**当前状态（2026-10-16）**：基座已是 **Folia 26.3**（区域化由上游提供），命令复活（`data`/`scoreboard`/`clone`）与 **EXP 可挂起命令方块链**均已落地并实测通过；验收套件分层为 L0/L1/L2（`tools/smoke/run_suite.py`）。
+> 本期（2026-10-16 起）服务端核心为 **Snapshot**，按 GitHub **pre-release** 发布，不建议用于生产。
+> 版本串与发布链路的约定见 [docs/18](docs/18-版本与发布约定.md)。
 
 | 能力 | 状态 |
 |---|---|
-| 构建链路 | ✅ 实测通过：`applyAllPatches` + `:cerulean-server:createPaperclipJar` 可在 Java 25 上产出分发 jar |
+| 基座 | ✅ Folia 26.3（`paperRef`/`mcVersion` 在 `gradle.properties` 里锁定） |
+| 构建链路 | ✅ `applyAllPatches` + `:cerulean-server:createPaperclipJar`，Java 25 上产出 paperclip 分发 jar |
 | 发行物可复现校验 | ✅ 自带工具可复现上游/自家分发链并逐字节校验（含篡改自检） |
-| 语义基线冒烟 | ✅ RCON 驱动的用例集，可对原生 Paper 与自家产物运行 |
-| 品牌与配置 | ✅ 产物的 MANIFEST 为 `Brand-Id: cerulean:cores`（已实测） |
-| **区域化拓扑接线（C2）** | ✅ **已接入真实服务端**：区域可切分/查询/串行 tick，行为与 vanilla 逐项一致（见 [docs/08](docs/08-C2-验收记录.md)） |
-| **区域化并行 tick** | ❌ 尚未实现（C3：区域→线程调度、段级票据、跨区域派发） |
-| 命令方块语义层 | ❌ 尚未开始（Phase 2 之后） |
+| 命令复活 | ✅ `data` / `scoreboard` / `clone`；clone 支持跨区域与**跨维度**两跳 + 方块刻搬运 |
+| 命令方块 | ✅ 配置模式开关（SAFE 默认 / ACCESS / EXP）；**矿车（`MinecartCommandBlock`）回归未覆盖** |
+| EXP 可挂起链 | ✅ EXP v2 语义接入并实测（SAFE 与 EXP 两种模式各起一次服验收）；**OCC 明确排除** |
+| 并发加固 | ✅ Scoreboard 并发容器 + 稀疏锁；**真跨区域并发压测受环境限制未做**（见下） |
+| 验收套件 | ✅ L0/L1/L2 分层（`tools/smoke/run_suite.py`），同时是**发布闸门** |
+| 已知限制 | ⚠️ ① 同步跨区域读取要求 Folia 调度器 **≥2 个线程**（否则自锁，套件记「未验证」而非通过）；② 链的挂起/恢复路径需要 ≥2 个区域才能构造，当前冒烟环境是单区域；③ 命令方块矿车未回归；④ EXP 的 OCC 部分未做 |
 
-> 换句话说：现在构建出来的东西，行为**等同于 Paper 26.3**，只是换成了 CeruLean 的身份与构建管线。这一点我们不会含糊过去。
-
-## 路线图
-
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| **Phase 0** | 上游 pin 登记、可复现校验工具、补丁栈目录、CI | ✅ 完成 |
-| **Phase 1** | paperweight 构建接入、参数化语义基线 | ✅ 完成 |
-| **Phase 2** | **区域化（自研）**：C0 设计 → C1 纯 Java 核心 → C2 MC 接线 → C3 内容并行 → C4 生产化 | 🔄 C0/C1/C2 完成，C3 待开始 |
-| **Phase 3** | 命令语义 / 命令方块 EXP 链 | ⏳ 未开始 |
-
-区域化的设计规格见 **[docs/06-区域化设计规格.md](docs/06-区域化设计规格.md)**：其中包含 9 条不变量、状态机、锁纪律、状态挂载与迁移契约、跨区域访问的唯一通道，以及**明确列出的、我们与上游实现不同的 6 处取舍**。
+**这些限制都写在验收记录里，不含糊过去。** 每一条都能在文末的文档索引里找到对应的实测证据。
 
 ## 快速开始
 
@@ -81,36 +109,63 @@ CeruLean Cores 是一个 Minecraft Java 版服务端发行版。它**不是**又
 ### 构建
 
 ```sh
-# 1) 拉取上游 Paper 到 pin 的提交 + 反编译 + 应用补丁
+# 1) 拉取上游到 pin 的提交 + 反编译 + 应用全部补丁（Folia 与我们自己的）
 ./gradlew applyAllPatches
 
-# 2) 产出 Paperclip 分发 jar（对外发行物）
+# 2) 产出 paperclip 分发 jar（对外发行物）
 ./gradlew :cerulean-server:createPaperclipJar
 
 # 3) 运行
 java -Xmx4G -jar cerulean-server/build/libs/cerulean-paperclip-*.jar --nogui
 ```
 
-**在 HarmonyOS PC 上**（本项目的主要开发机）请改用 `tools/gradle-local.sh`：该环境的 `gradlew` 脚本会把默认 JVM 参数错当主类、且 Java 侧无法完成 Gradle 发行包的下载重定向。细节与绕行方式见 [docs/03-构建接入.md](docs/03-构建接入.md)。
+**在 HarmonyOS PC 上**（本项目的主要开发机）请改用 `tools/gradle-local.sh`：该环境的 `gradlew`
+脚本会把默认 JVM 参数错当主类、且 Java 侧无法完成 Gradle 发行包的下载重定向。
+细节与绕行方式见 [docs/03-构建接入.md](docs/03-构建接入.md)。
+
+## 验收
+
+验收分三层，统一入口是 `tools/smoke/run_suite.py`：
+
+| 层 | 回答什么问题 | 内容 |
+|---|---|---|
+| **L0** | 基座活着吗 | 区域调度线程数、各 world 的区域拓扑、区块加载后区域是否出现 |
+| **L1** | 基座把自己的状态报出来了吗、有没有在报警 | 上游的区域级 `/tps`、内置 spark、`/paper` 命令面、watchdog 无"区域停摆"告警，加上我们自己的诊断命令（`/cerulean regions\|regionat\|dispatch\|exp`） |
+| **L2** | 具体用例行为对不对 | scoreboard+clone（含跨维度真拷）、EXP 链（SAFE/EXP 两轮起服）、scoreboard 顺序压力、存档往返 |
+
+```sh
+export CERULEAN_EULA=TRUE RCON_PORT=25575 RCON_PASSWORD=test1234
+python3 tools/smoke/run_suite.py            # L0 + L1 + L2 全跑
+```
+
+**退出码约定**：子项 `0`=通过、`1`=失败、**`2`=环境前提不满足（未验证）**。
+「未验证」在汇总里单列，**既不算通过也不算失败**——不允许用 exit 0 假装通过。
+
+发布工作流 `.github/workflows/release.yml` 会把上面这套套件当作**发布闸门**：
+打 tag → 构建 → 跑套件 → 全绿才建 pre-release。
 
 ## 项目结构
 
 ```
 CeruLean/
 ├── build.gradle.kts / settings.gradle.kts     paperweight patcher 配置（patch-only fork）
-├── gradle.properties                          上游 pin（版本 / 构建号 / sha256 锁定）
-├── regionizer-core/                           纯 Java 区域化内核（C1；零 MC 依赖，含模型检验）
-├── cerulean-regions/                          MC 侧接线与诊断命令（C2）
-├── cerulean-server/                           服务端侧补丁（minecraft-patches / paper-patches）
+├── gradle.properties                          上游 pin（mcVersion / paperRef / 版本通道）
+├── cerulean-server/                           服务端侧补丁
+│   └── minecraft-patches/features/            0001–0011 = vendor 进来的 Folia 补丁
+│                                              0012–      = 本项目自己的补丁
 ├── cerulean-api/                              API 侧补丁
-├── cerulean-checkstyle/                       代码风格模块适配（Paper 26.3 新增了该模块）
+├── cerulean-checkstyle/                       代码风格模块适配（Paper 26.3 新增该模块）
+├── cerulean-regions/                          非补丁的自研代码（编译进 cerulean-server）
+│   ├── io/cerulean/regions/                   跨区域投递原语 + 诊断命令
+│   └── com/azurebranches/                     EXP 链支撑库（纯 JDK，零 MC import）+ 配置
+├── regionizer-core/                           【已归档】自研区域化内核（原 C1 路线，已收缩，不参与构建）
 ├── tools/
 │   ├── verify/                                上游复现与漂移校验（零依赖，单文件 Java）
-│   ├── smoke/                                 语义基线冒烟 + 测试服务器启停（RCON 驱动）
+│   ├── smoke/                                 分层验收套件 + 测试服务器启停（RCON 驱动）
 │   ├── icon/                                  图标：SVG 生成器 + SVG→PNG 栅格化器
 │   └── gradle-local.sh                        本机 Gradle 启动器（HarmonyOS 绕行）
-├── docs/                                      设计、约束、手册、分析报告
-└── study/folia/                               Folia 源码阅读区（12 课笔记 + 参考源码副本）
+├── docs/                                      设计、约束、手册、执行与验收记录
+└── study/                                     Folia 源码阅读区（阅读笔记 + 参考源码副本，不参与构建）
 ```
 
 ## 验证工具
@@ -124,34 +179,44 @@ tools/verify/cerulean-verify selftest --version 26.3
 
 # 类级漂移报告（用于评估上游改动影响面）
 tools/verify/cerulean-verify diff <jarA> <jarB>
-
-# 语义基线冒烟（对任意 Paper/本项目 jar）
-CERULEAN_EULA=TRUE tools/smoke/run-smoke.sh <paperclip.jar> ./smoke-report
 ```
 
-## 文档与阅读笔记
+## 文档
+
+**当前有效**
 
 | 文档 | 内容 |
 |---|---|
-| [docs/00-立项与约束.md](docs/00-立项与约束.md) | 定位、三条硬约束（GPLv3 / Java 25 / 上游节奏） |
-| [docs/01-上游层叠与pin策略.md](docs/01-上游层叠与pin策略.md) | 层叠关系、pin 策略与升级流程 |
-| [docs/02-复现校验手册.md](docs/02-复现校验手册.md) | 为什么需要复现校验、校验链说明 |
-| [docs/03-构建接入.md](docs/03-构建接入.md) | paperweight fork 形态、补丁格式规则、本机环境坑 |
-| [docs/05-命令方块语义基线.md](docs/05-命令方块语义基线.md) | 命令方块语义的源码级基线（含实测记录） |
-| [docs/06-区域化设计规格.md](docs/06-区域化设计规格.md) | **区域化自研设计（当前主干文档）** |
-| [study/folia/](study/folia/) | Folia 源码阅读区：00–11 课（接入机制 / 拓扑 / 调度 / 跨区域 / hook 施工图） |
-| [docs/AzureBranches-vs-Folia-改动对比.md](docs/AzureBranches-vs-Folia-改动对比.md) | 上一代项目相对上游改了什么（实测） |
-| [docs/EXP链移植可行性分析.md](docs/EXP链移植可行性分析.md) | 命令方块 EXP 链的移植可行性、风险与优化建议 |
+| [docs/14-交接待办.md](docs/14-交接待办.md) | T1–T7 清单与完成状态（含"三步法：安全复活一条被下架的命令"） |
+| [docs/15-T1T2T3-验收记录.md](docs/15-T1T2T3-验收记录.md) | 命令复活的第一批：`data`/`scoreboard`/`clone`，以及**二级根因**（区域 tick 上下文） |
+| [docs/16-T4-EXP链移植记录.md](docs/16-T4-EXP链移植记录.md) | EXP 链移植：三条硬前置、移植方式、验收判别器、已知限制 |
+| [docs/17-R1R2-并发与跨区域记录.md](docs/17-R1R2-并发与跨区域记录.md) | Scoreboard 并发加固、clone 两跳、**调度线程自锁**的实测根因与防护 |
+| [docs/18-版本与发布约定.md](docs/18-版本与发布约定.md) | 版本串的唯一来源、发布链路、离线等价校验清单 |
+| [docs/12-Folia基座分诊记录.md](docs/12-Folia基座分诊记录.md) / [docs/13-EXP链移植到26.3-可行性.md](docs/13-EXP链移植到26.3-可行性.md) | 切基座时的分诊与可行性评估 |
+| [docs/00-立项与约束.md](docs/00-立项与约束.md) · [01](docs/01-上游层叠与pin策略.md) · [02](docs/02-复现校验手册.md) · [03](docs/03-构建接入.md) · [05](docs/05-命令方块语义基线.md) | 定位与硬约束、pin 策略、复现校验、构建接入、命令方块语义基线 |
+
+**历史文档**（记录已被取代的路线，保留以便追溯决策，**不要据此实现**）：
+[docs/06-区域化设计规格.md](docs/06-区域化设计规格.md)（自研区域化设计）、
+[docs/07](docs/07-C2-MC接线.md) / [08](docs/08-C2-验收记录.md) / [09](docs/09-C3-计划.md) / [10](docs/10-B2-测试报告.md)
+（C2/C3/B2 阶段的接线、验收与计划）、
+[docs/Phase2-区域化移植路线.md](docs/Phase2-区域化移植路线.md)、
+[docs/EXP链移植可行性分析.md](docs/EXP链移植可行性分析.md)（基于 Paper 主线的早期分析，结论已被 docs/13 更新）。
+`study/` 下的阅读笔记是当时对 Folia 源码的学习记录，仍然有效。
 
 ## 与上游的关系
 
-本项目是 [PaperMC/Paper](https://github.com/PaperMC/Paper) 的下游，采用与 [PaperMC/Folia](https://github.com/PaperMC/Folia) 相同的补丁式构建形态；
-区域化设计以 Folia 为**参考与反面教材**（其源码阅读副本位于 `study/folia/src/`，**不参与构建**）。
-命令方块语义层的目标继承自同作者的上一代项目 [AzureBranches](https://github.com/XCxyTianQ/AzureBranches)。
+- 构建形态与 [PaperMC/Folia](https://github.com/PaperMC/Folia) 相同（paperweight patch-only fork），
+  **Folia 26.3 是本项目的基座**：它的补丁被 vendor 进 `cerulean-server/minecraft-patches/features/0001–0011`，
+  本项目的补丁从 `0012` 开始。
+- 上游层叠：`Mojang server.jar → Paper（paperRef 锁定）→ Folia 26.3 → CeruLean`。
+- **EXP 链的语义目标与实现史继承自同作者的上一代项目
+  [AzureBranches](https://github.com/XCxyTianQ/AzureBranches)**（Folia 26.1.2 基座，13 站演进）。
+  本项目移植的是它的 **EXP v2** 部分；OCC 部分（构建期注入、依赖 `RegionCommandExecutor`）明确排除。
+- `study/` 下的 Folia 源码是**阅读用参考副本**，不参与构建。
 
 完整的衍生关系、许可证与 Minecraft EULA 声明见 **[NOTICE.md](NOTICE.md)**。
 
 ## 许可证
 
-**GPLv3** —— 继承链：`Bukkit / CraftBukkit → Spigot → Paper → (Folia) → AzureBranches → CeruLean`。
+**GPLv3** —— 继承链：`Bukkit / CraftBukkit → Spigot → Paper → Folia → AzureBranches → CeruLean`。
 分发时必须附完整对应源码（含全部补丁）并保留 [NOTICE.md](NOTICE.md)。详见 [LICENSE](LICENSE)。
