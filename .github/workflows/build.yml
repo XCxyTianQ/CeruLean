@@ -62,35 +62,20 @@ jobs:
           path: ${{ steps.artifact.outputs.jar }}
           if-no-files-found: error
 
-      - name: 冒烟测试（语义基线）
+      - name: 验收套件（L0 基座活性 / L1 可观测面 / L2 用例）
         env:
           CERULEAN_EULA: "TRUE"
           CERULEAN_EXPECT_MC: "26.3"
         run: |
-          chmod +x tools/smoke/*.sh
-          # 不吞失败：冒烟失败必须让 job 变红（曾经用 `|| echo SMOKE_FAILED=1`，
-          # 而全流程无人检查该变量，导致 CI 假绿）
-          tools/smoke/run-smoke.sh "${{ steps.artifact.outputs.jar }}" ./smoke-report
-
-      - name: 配置验收（cerulean-regions 是否真的驱动内核）
-        env:
-          CERULEAN_EULA: "TRUE"
-          CERULEAN_EXPECT_MC: "26.3"
-        run: |
-          # 跑两轮：默认 merge-radius=2，再改成 1，比较实测的合并阈值（必须左移 1 段）。
-          # 这是"配置被忽略"这类问题的唯一可靠检出方式。
-          chmod +x tools/smoke/*.sh
-          tools/smoke/c3-config-acceptance.sh "${{ steps.artifact.outputs.jar }}" ./smoke-config-report
-
-      - name: 归属校验验收（B2：off / soft / strict 三模式）
-        env:
-          CERULEAN_EULA: "TRUE"
-          CERULEAN_EXPECT_MC: "26.3"
-        run: |
-          # 三模式各起一次服务端，断言 off 放行且零记录、soft 放行但记录"将会违规"、strict 拒绝并抛异常。
-          # 这是"归属闸门真的接上了、策略真的生效"的决定性证据（默认 off 时与 Paper 行为一致）。
-          chmod +x tools/smoke/*.sh
-          tools/smoke/b2-ownership-acceptance.sh "${{ steps.artifact.outputs.jar }}" ./smoke-ownership-report
+          # 基座换成 Folia 26.3 之后，**旧的 Paper 冒烟基线不再适用**：
+          #   * run-smoke.sh 的旧基线在 Folia 上 PASS 2/FAIL 6 属预期（见 docs/12），不要试图跑绿；
+          #   * c3-config-acceptance.sh / b2-ownership-acceptance.sh 测的是**已被收缩掉的自研区域化运行时**
+          #     （B1/B2/C2），在本基座上必然失败。
+          # 回归闸门改为我们自己的分层套件：
+          #   L0 基座活性 → L1 可观测面（区域级 TPS、我们自己的诊断命令、watchdog 无停摆告警）
+          #   → L2 用例（scoreboard/clone、EXP 链、并发压力、存档往返）
+          # 子项退出码 2 = 环境前提不满足（未验证），既不算通过也不算失败，汇总里单列。
+          python3 tools/smoke/run_suite.py --jar "${{ steps.artifact.outputs.jar }}"
 
       - name: 上传冒烟报告
         if: always()
@@ -98,7 +83,7 @@ jobs:
         with:
           name: smoke-report
           path: |
-            smoke-report/
-            smoke-config-report/
-            smoke-ownership-report/
+            smoke-suite/
+            smoke-exp/
+            smoke-persist/
           if-no-files-found: warn

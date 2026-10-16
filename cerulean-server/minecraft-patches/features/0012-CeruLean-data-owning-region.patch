@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Thu, 16 Oct 2026 00:00:00 +0800
+Subject: [PATCH] CeruLean data command: defer block-entity access into the owning region
+
+---
+Folia 因区域安全把 data 命令下架（Commands.java 注释掉其注册）。安全放开的关键不是
+只给 getData/setData 加投递，而是**参数解析期也不得访问世界**：
+  BlockDataAccessor.PROVIDER 原先在调用者线程上就 getBlockEntity ⇒ 实测抛异常
+  （栈：BlockDataAccessor.lambda$static$2 第 30 行）。
+本补丁让 PROVIDER 只解析位置、BlockDataAccessor 改持 (level,pos)，方块实体访问与读写
+整体推迟到 AwaitableDispatch 的投递体内（拥有该区块的区域线程）。
+---
+diff --git a/net/minecraft/server/commands/data/BlockDataAccessor.java b/net/minecraft/server/commands/data/BlockDataAccessor.java
+index 9542b4c..88cc6d9 100644
+--- a/net/minecraft/server/commands/data/BlockDataAccessor.java
++++ b/net/minecraft/server/commands/data/BlockDataAccessor.java
+@@ -1,5 +1,6 @@
+ package net.minecraft.server.commands.data;
+ 
++import com.mojang.brigadier.exceptions.CommandSyntaxException;
+ import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
+ import com.mojang.logging.LogUtils;
+ import java.util.Locale;
+@@ -12,6 +13,7 @@ import net.minecraft.nbt.NbtUtils;
+ import net.minecraft.nbt.Tag;
+ import net.minecraft.network.chat.Component;
+ import net.minecraft.server.commands.ArgProvider;
++import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.util.ProblemReporter;
+ import net.minecraft.world.level.block.Block;
+ import net.minecraft.world.level.block.entity.BlockEntity;
+@@ -26,37 +28,62 @@ public class BlockDataAccessor implements DataAccessor {
+     );
+     public static final ArgProvider.Factory<DataAccessor> PROVIDER = arg -> ArgProvider.create(
+         "block", () -> Commands.argument(arg, BlockPosArgument.blockPos()), context -> {
++            // CeruLean start - 只解析位置，**不触碰世界**。
++            // 原实现在这里（参数解析期、调用者线程上）就读方块实体；在区域化基座上，非拥有者线程访问
++            // 世界内容非法且会抛异常（实测栈：BlockDataAccessor.lambda$static$2 第 30 行）。
++            // 因此世界访问整体推迟到投递体内部（拥有该区块的区域线程上），见 getData/setData。
+             BlockPos pos = BlockPosArgument.getLoadedBlockPos(context, arg);
+-            BlockEntity entity = context.getSource().getLevel().getBlockEntity(pos);
+-            if (entity == null) {
+-                throw ERROR_NOT_A_BLOCK_ENTITY.create();
+-            } else {
+-                return new BlockDataAccessor(entity, pos);
+-            }
++            return new BlockDataAccessor(context.getSource().getLevel(), pos);
++            // CeruLean end
+         }
+     );
+-    private final BlockEntity entity;
++    private final ServerLevel level;
+     private final BlockPos pos;
+ 
+-    public BlockDataAccessor(final BlockEntity entity, final BlockPos pos) {
+-        this.entity = entity;
++    public BlockDataAccessor(final ServerLevel level, final BlockPos pos) {
++        this.level = level;
+         this.pos = pos;
+     }
+ 
++    /** 在**拥有该区块的线程**上取方块实体（缺失时按原语义报错）。 */
++    private BlockEntity entity() throws CommandSyntaxException {
++        final BlockEntity entity = this.level.getBlockEntity(this.pos);
++        if (entity == null) {
++            throw ERROR_NOT_A_BLOCK_ENTITY.create();
++        }
++        return entity;
++    }
++
+     @Override
+     public void setData(final CompoundTag tag) {
+-        BlockState state = this.entity.getLevel().getBlockState(this.pos);
+-
+-        try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(this.entity.problemPath(), LOGGER)) {
+-            this.entity.loadWithComponents(TagValueInput.create(reporter, this.entity.getLevel().registryAccess(), tag));
+-            this.entity.setChanged();
+-            this.entity.getLevel().sendBlockUpdated(this.pos, state, state, Block.UPDATE_ALL);
+-        }
++        // CeruLean start - 投递到拥有者：世界访问只能发生在拥有线程上
++        io.cerulean.regions.AwaitableDispatch.run(this.level, this.pos, () -> {
++            try {
++                final BlockEntity entity = this.entity();
++                final BlockState state = this.level.getBlockState(this.pos);
++                try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(entity.problemPath(), LOGGER)) {
++                    entity.loadWithComponents(TagValueInput.create(reporter, this.level.registryAccess(), tag));
++                    entity.setChanged();
++                    this.level.sendBlockUpdated(this.pos, state, state, Block.UPDATE_ALL);
++                }
++            } catch (final CommandSyntaxException ex) {
++                throw new IllegalStateException(ex.getRawMessage().getString(), ex);
++            }
++        });
++        // CeruLean end
+     }
+ 
+     @Override
+     public CompoundTag getData() {
+-        return this.entity.saveWithFullMetadata(this.entity.getLevel().registryAccess());
++        // CeruLean start - 读取同样投递到拥有者（data get 需要返回值 ⇒ awaitable）
++        return io.cerulean.regions.AwaitableDispatch.call(this.level, this.pos, () -> {
++            try {
++                return this.entity().saveWithFullMetadata(this.level.registryAccess());
++            } catch (final CommandSyntaxException ex) {
++                throw new IllegalStateException(ex.getRawMessage().getString(), ex);
++            }
++        });
++        // CeruLean end
+     }
+ 
+     @Override

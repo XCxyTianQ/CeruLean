@@ -1,0 +1,777 @@
+/*
+ * AzureBranches - Phase-Based Consistency Snapshot (EXP3)
+ *
+ * PhaseSnapshot provides a per-Walking-phase block state cache that enables
+ * consistent read-after-write semantics within a single uninterrupted chain
+ * execution window (a "Phase" in EXP terminology).
+ *
+ * EXP3 extensions (v26.1.2-EXP3):
+ *
+ *   Read Set Validation (OCC):
+ *     recordRead(pos, tick) records every cross-region read. On Phase commit,
+ *     the readSet is checked against external modifications. Conflict → rollback.
+ *
+ *   Write Set Rollback:
+ *     oldBlockStates stores pre-write values for every putBlock(). On conflict,
+ *     Phase rolls back by restoring oldBlockStates.
+ *
+ *   Savepoints:
+ *     createSavepoint() / rollbackTo() enable partial rollback within a Phase,
+ *     so that errors late in the Phase do not invalidate all earlier work.
+ *
+ *   Irreversible Operations:
+ *     Operations like /say, /tellraw are marked via markIrreversible(). They
+ *     execute regardless of Phase outcome (Nested Top Action semantics, per
+ *     ARIES recovery algorithm).
+ *
+ * Lifecycle (EXP3):
+ *
+ *   Phase N start:   new PhaseSnapshot(currentTick)          — clean cache + readSet + savepoints
+ *   Phase N Walking: getCached / putBlock / markPendingWrite / recordRead / createSavepoint
+ *   Phase N end:     getPendingWritePositions() + getReadSet() → Continuation
+ *
+ *   Phase N+1 start: PhaseSnapshot.fromContinuation(cont, currentTick)
+ *                    → validates readSet against external changes
+ *                    → conflict? rollback + retry. no conflict? commit + resume.
+ *
+ * Thread safety:
+ *   Block/score layers are thread-confined to the home region thread during
+ *   Walking. The NBT layer (EXP6) is additionally captured from the entity
+ *   region threads that materialize /data values, so the four NBT maps use
+ *   ConcurrentHashMap and tolerate concurrent capture + validation reads.
+ *
+ * Zero Minecraft-internal imports by design — all block state references are
+ * stored as java.lang.Object.
+ */
+package com.azurebranches.command;
+
+import java.util.ArrayDeque;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+public final class PhaseSnapshot {
+
+    // ================================================================
+    //  Cache layers
+    // ================================================================
+
+    /** Block state cache: BlockPos.asLong() → BlockState. */
+    private final Map<Long, Object> blockCache;
+
+    /** Positions with pending cross-region writes (propagated to Continuation). */
+    private final Set<Long> pendingWritePositions;
+
+    // ================================================================
+    //  EXP4: Scoreboard layer
+    // ================================================================
+
+    /** Score cache: "objective:holder" → value. */
+    private final Map<String, Integer> scoreCache;
+
+    /** Pre-write score values for rollback (reverse-operation compensation). */
+    private final Map<String, Integer> oldScoreValues;
+
+    /** Score keys with pending cross-region writes. */
+    private final Set<String> pendingScoreKeys;
+
+    /** Score keys read during this Phase (OCC read-set for scores). */
+    private final Map<String, Long> scoreReadSet;
+
+    /**
+     * EXP5Plus: The score value actually observed at each read position,
+     * captured at read time. This is what OCC validation compares against the
+     * live scoreboard to detect a non-repeatable score read.
+     */
+    private final Map<String, Integer> scoreReadSetValues;
+
+    // ================================================================
+    //  EXP4: Entity NBT layer (EntityLayer backing store)
+    // ================================================================
+
+    /** NBT write cache: composite-key → cached value. */
+    private final Map<String, Object> nbtCache;
+
+    /** Pre-write NBT values for rollback compensation. */
+    private final Map<String, Object> nbtOldValues;
+
+    /** NBT read-set for OCC validation: composite-key → tick. */
+    private final Map<String, Long> nbtReadSet;
+
+    /**
+     * EXP6: The NBT value actually observed at each read position, captured
+     * at read time. This is what OCC validation compares against the live
+     * entity to detect a non-repeatable NBT read.
+     */
+    private final Map<String, Object> nbtReadSetValues;
+
+    // ================================================================
+    //  EXP6Plus: Scoreboard entity read-set
+    // ================================================================
+
+    /**
+     * EXP6Plus: Entities resolved by /scoreboard holder arguments (selectors,
+     * UUID lookups, player names) during this Phase: entityId → tick.
+     * OCC validation checks that each entity still exists at commit time —
+     * a holder whose entity died between resolution and validation means the
+     * Phase read a stale entity set (L1 phantom-read guard, existence bound).
+     */
+    private final Map<Integer, Long> entityReadSet;
+
+    /**
+     * EXP6Plus: The observed scoreboard identity (scoreboardName) of each
+     * resolved entity, for diagnostics and for the ghost-score guard at
+     * rollback (dead holders are skipped instead of recreating entries).
+     */
+    private final Map<Integer, String> entityReadSetValues;
+
+    // ================================================================
+    //  EXP4: DeferredAction queue (entity lifecycle WAL)
+    // ================================================================
+
+    /** Deferred entity lifecycle actions (kill/tp/summon), applied at commit. */
+    private final java.util.List<DeferredAction> deferredActions;
+
+    /** Virtual entity ID counter for deferred summons (starts from -1). */
+    private int nextVirtualId;
+
+    /**
+     * EXP3: Positions read during this Phase, with the tick at which they
+     * were read. Used for OCC validation at Phase commit time.
+     * <p>
+     * Value is the game tick when the read occurred (ServerLevel#getGameTime).
+     */
+    private final Map<Long, Long> readSet;
+
+    /**
+     * EXP4Plus: The block state actually observed at each read position, captured
+     * at read time. This is what OCC validation compares against the live world to
+     * detect a non-repeatable read (an external write between our read and commit).
+     * Values are stored as java.lang.Object to keep this class Minecraft-free.
+     */
+    private final Map<Long, Object> readSetValues;
+
+    /**
+     * EXP3: Pre-write block states for rollback. Before any putBlock(),
+     * the old state is recorded here. If the Phase is rolled back, these
+     * values are restored.
+     */
+    private final Map<Long, Object> oldBlockStates;
+
+    /**
+     * EXP3: Savepoint stack for intra-Phase partial rollback.
+     * Deque (stack semantics) — most recent savepoint is on top.
+     */
+    private final Deque<Savepoint> savepoints;
+
+    /**
+     * EXP3: Whether this Phase contains irreversible side-effects
+     * (e.g. /say, /tellraw). Such Phases cannot be fully rolled back;
+     * only data operations are compensated.
+     */
+    private boolean hasIrreversibleOps;
+
+    /** Game time (ServerLevel#getGameTime) when this snapshot was created. */
+    private final long snapshotTick;
+
+    // ================================================================
+    //  Construction
+    // ================================================================
+
+    public PhaseSnapshot(final long tick) {
+        this.blockCache = new HashMap<>();
+        this.pendingWritePositions = new HashSet<>();
+        this.readSet = new HashMap<>();
+        this.readSetValues = new HashMap<>();
+        this.oldBlockStates = new HashMap<>();
+        this.savepoints = new ArrayDeque<>();
+        this.scoreCache = new HashMap<>();
+        this.oldScoreValues = new HashMap<>();
+        this.pendingScoreKeys = new HashSet<>();
+        this.scoreReadSet = new HashMap<>();
+        this.scoreReadSetValues = new HashMap<>();
+        this.nbtCache = new ConcurrentHashMap<>();
+        this.nbtOldValues = new ConcurrentHashMap<>();
+        this.nbtReadSet = new ConcurrentHashMap<>();
+        this.nbtReadSetValues = new ConcurrentHashMap<>();
+        this.entityReadSet = new ConcurrentHashMap<>();
+        this.entityReadSetValues = new ConcurrentHashMap<>();
+        this.deferredActions = new java.util.ArrayList<>(8);
+        this.nextVirtualId = -1;
+        this.snapshotTick = tick;
+    }
+
+    public static PhaseSnapshot fromContinuation(final Continuation cont, final long tick) {
+        final PhaseSnapshot snap = new PhaseSnapshot(tick);
+        if (cont != null) {
+            if (cont.pendingWritePositions != null) {
+                for (final long pos : cont.pendingWritePositions) {
+                    snap.pendingWritePositions.add(pos);
+                }
+            }
+            // EXP3: inherit readSet positions for validation context
+            if (cont.readSetPositions != null) {
+                for (final long pos : cont.readSetPositions) {
+                    snap.readSet.put(pos, tick);
+                }
+            }
+            // EXP4: inherit pre-write old block states captured by the remote
+            // batch, so an OCC conflict can restore the world before retrying.
+            if (cont.oldStateCapture != null) {
+                for (final Map.Entry<Long, Object> e : cont.oldStateCapture.entrySet()) {
+                    snap.oldBlockStates.putIfAbsent(e.getKey(), e.getValue());
+                }
+            }
+            // EXP6Plus: inherit the entity read-set (entityId -> scoreboard
+            // name) so a later Phase's validation still sees entities that an
+            // earlier Phase of the same chain resolved — an entity that dies
+            // mid-chain must trigger CHECK_ENTITY_READ_SET on the NEXT verify,
+            // not only on the verify of the Phase that resolved it.
+            if (cont.entityReadCarry != null) {
+                for (final Map.Entry<Integer, String> e : cont.entityReadCarry.entrySet()) {
+                    snap.entityReadSet.putIfAbsent(e.getKey(), tick);
+                    snap.entityReadSetValues.putIfAbsent(e.getKey(), e.getValue());
+                }
+            }
+            // EXP6Plus: inherit score write/read state so a later Phase's
+            // rollback compensates score writes from earlier Phases of the
+            // same chain (chain = one transaction across Phases).
+            if (cont.oldScoreValuesCarry != null) {
+                for (final Map.Entry<String, Integer> e : cont.oldScoreValuesCarry.entrySet()) {
+                    snap.oldScoreValues.putIfAbsent(e.getKey(), e.getValue());
+                }
+            }
+            if (cont.scoreCacheCarry != null) {
+                for (final Map.Entry<String, Integer> e : cont.scoreCacheCarry.entrySet()) {
+                    snap.scoreCache.putIfAbsent(e.getKey(), e.getValue());
+                }
+            }
+        }
+        return snap;
+    }
+
+    // ================================================================
+    //  Read path
+    // ================================================================
+
+    public Object getCached(final long pos) {
+        return blockCache.get(pos);
+    }
+
+    public boolean isCached(final long pos) {
+        return blockCache.containsKey(pos);
+    }
+
+    /**
+     * EXP3: Record a cross-region read for OCC validation.
+     * Called by commands that read block states during EXP chain execution.
+     *
+     * @param pos  BlockPos.asLong()
+     * @param tick current ServerLevel#getGameTime at read time
+     */
+    public void recordRead(final long pos, final long tick) {
+        readSet.putIfAbsent(pos, tick);
+    }
+
+    /**
+     * EXP4Plus: Record a read together with the state observed at that moment.
+     * The observed state is the baseline for OCC read-set validation.
+     *
+     * @param pos   BlockPos.asLong()
+     * @param state the block state observed (may be null for air/removed)
+     * @param tick  current ServerLevel#getGameTime at read time
+     */
+    public void recordRead(final long pos, final Object state, final long tick) {
+        readSet.putIfAbsent(pos, tick);
+        readSetValues.putIfAbsent(pos, state);
+    }
+
+    /**
+     * EXP3: Get the read set for validation and Continuation propagation.
+     */
+    public Map<Long, Long> getReadSet() {
+        return readSet;
+    }
+
+    /**
+     * EXP4Plus: Positions -> the block state observed when they were read.
+     * Used by the EXP chain walker to verify the read set against the live world.
+     */
+    public Map<Long, Object> getReadSetValues() {
+        return readSetValues;
+    }
+
+    /** EXP3: Number of recorded cross-region reads in this Phase. */
+    public int readSetSize() {
+        return readSet.size();
+    }
+
+    // ================================================================
+    //  EXP4: Scoreboard read/write path
+    // ================================================================
+
+    /** Build a score key from objective name and holder name. */
+    public static String scoreKey(final String objective, final String holder) {
+        return objective + ":" + holder;
+    }
+
+    /** Try to retrieve a cached score value. */
+    public Integer getCachedScore(final String key) {
+        return scoreCache.get(key);
+    }
+
+    /**
+     * Store a score value in the cache with rollback support.
+     * For arithmetic operations (add/remove), the delta = newVal - oldVal
+     * is stored as the compensation operation rather than the raw value.
+     *
+     * @param key     "objective:holder"
+     * @param newVal  expected score after this Phase's operations
+     * @param oldVal  score before this Phase's operations (for rollback compensation)
+     */
+    public void putScore(final String key, final int newVal, final int oldVal) {
+        scoreCache.put(key, newVal);
+        if (!oldScoreValues.containsKey(key)) {
+            oldScoreValues.put(key, oldVal);
+        }
+    }
+
+    /** Mark a score key as having a pending cross-region write. */
+    public void markPendingScore(final String key) {
+        pendingScoreKeys.add(key);
+    }
+
+    /** Check if a score key has a pending write. */
+    public boolean hasPendingScore(final String key) {
+        return pendingScoreKeys.contains(key);
+    }
+
+    /**
+     * Record a score read for OCC validation.
+     * @param key  "objective:holder"
+     * @param tick current game tick at read time
+     */
+    public void recordScoreRead(final String key, final long tick) {
+        scoreReadSet.putIfAbsent(key, tick);
+    }
+
+    /**
+     * EXP5Plus: Record a score read together with the value observed at that
+     * moment. The observed value is the baseline for OCC score read-set
+     * validation (compared against the live scoreboard at Phase resume).
+     */
+    public void recordScoreRead(final String key, final int value, final long tick) {
+        scoreReadSet.putIfAbsent(key, tick);
+        scoreReadSetValues.putIfAbsent(key, value);
+    }
+
+    /**
+     * EXP5Plus: Score keys → the value observed when they were read.
+     * Used by the EXP chain walker to verify the score read-set against the
+     * live scoreboard on the global tick thread.
+     */
+    public Map<String, Integer> getScoreReadSetValues() {
+        return scoreReadSetValues;
+    }
+
+    /** Get the score read-set for validation. */
+    public Map<String, Long> getScoreReadSet() {
+        return scoreReadSet;
+    }
+
+    /** Get old score values for rollback compensation. */
+    public Map<String, Integer> getOldScoreValues() {
+        return oldScoreValues;
+    }
+
+    /** Extract pending score keys for Continuation propagation. */
+    public String[] getPendingScoreKeys() {
+        return pendingScoreKeys.toArray(new String[0]);
+    }
+
+    /** Extract score read-set keys for Continuation propagation. */
+    public String[] getScoreReadSetKeys() {
+        return scoreReadSet.keySet().toArray(new String[0]);
+    }
+
+    /**
+     * Return the set of all score keys modified during this Phase.
+     * Backed by oldScoreValues — only keys that were actually written.
+     * Used by ScoreLayer.compensate() for inverse-operation rollback iteration.
+     */
+    public Set<String> scoreKeySet() {
+        return Collections.unmodifiableSet(oldScoreValues.keySet());
+    }
+
+    public int scoreCacheSize() { return scoreCache.size(); }
+    public int scoreReadSetCount() { return scoreReadSet.size(); }
+
+    /**
+     * EXP6Plus: Full score cache (key → value after this Phase's writes).
+     * Carried across Phase boundaries so a later Phase's rollback can
+     * compensate score writes made by earlier Phases of the same chain.
+     */
+    public Map<String, Integer> getScoreCache() {
+        return scoreCache;
+    }
+
+    // ================================================================
+    //  EXP4: Entity NBT cache (backing store for EntityLayer)
+    // ================================================================
+
+    /** Retrieve a cached NBT value by composite key. */
+    public Object getNbtCached(final String key) {
+        return nbtCache.get(key);
+    }
+
+    /**
+     * Store an NBT value in the cache with old-value recording for compensation.
+     * Only the first old value per key is saved (same semantics as putScore).
+     *
+     * @param key     composite key from EntityLayer.nbtKey()
+     * @param newVal  the value being written (Number or String)
+     * @param oldVal  the value before the write (for rollback compensation)
+     */
+    public void putNbt(final String key, final Object newVal, final Object oldVal) {
+        nbtCache.put(key, newVal);
+        if (oldVal != null) {
+            nbtOldValues.putIfAbsent(key, oldVal);
+        }
+    }
+
+    /** Get the pre-write (old) NBT value for a key. */
+    public Object getNbtOldValue(final String key) {
+        return nbtOldValues.get(key);
+    }
+
+    /**
+     * Record an NBT read for OCC validation.
+     * @param key  composite key from EntityLayer.nbtKey()
+     * @param tick current game tick at read time
+     */
+    public void recordNbtRead(final String key, final long tick) {
+        nbtReadSet.putIfAbsent(key, tick);
+    }
+
+    /**
+     * Record an NBT read for OCC validation, retaining the value observed.
+     * @param key   composite key from EntityLayer.nbtKey()
+     * @param value value seen at read time (may be null)
+     * @param tick  current game tick at read time
+     */
+    public void recordNbtRead(final String key, final Object value, final long tick) {
+        nbtReadSet.putIfAbsent(key, tick);
+        nbtReadSetValues.putIfAbsent(key, value);
+    }
+
+    /** Get the NBT read-set for OCC validation. */
+    public Map<String, Long> getNbtReadSet() {
+        return nbtReadSet;
+    }
+
+    /** Get the NBT values captured with the read-set (EXP6 validation). */
+    public Map<String, Object> getNbtReadSetValues() {
+        return nbtReadSetValues;
+    }
+
+    /**
+     * EXP6Plus: Record an entity resolved by a /scoreboard holder argument
+     * into the entity read-set, retaining its scoreboard identity.
+     *
+     * @param entityId       the entity's network ID
+     * @param scoreboardName the observed scoreboardName (identity value)
+     * @param tick           current game tick at resolution time
+     */
+    public void recordEntityRead(final int entityId, final String scoreboardName, final long tick) {
+        entityReadSet.putIfAbsent(entityId, tick);
+        if (scoreboardName != null) {
+            entityReadSetValues.putIfAbsent(entityId, scoreboardName);
+        }
+    }
+
+    /** Get the entity read-set (entityId → tick) for EXP6Plus validation. */
+    public Map<Integer, Long> getEntityReadSet() {
+        return entityReadSet;
+    }
+
+    /** Get the observed scoreboard identities of resolved entities. */
+    public Map<Integer, String> getEntityReadSetValues() {
+        return entityReadSetValues;
+    }
+
+    /** Return all keys modified in this Phase (for compensation iteration). */
+    public Set<String> nbtKeySet() {
+        return Collections.unmodifiableSet(nbtOldValues.keySet());
+    }
+
+    public int nbtCacheSize() { return nbtCache.size(); }
+    public int nbtReadSetSize() { return nbtReadSet.size(); }
+
+    // ================================================================
+    //  EXP4: DeferredAction queue
+    // ================================================================
+
+    /**
+     * Append a deferred entity lifecycle action. Actions are replayed
+     * in insertion order at Phase commit, or discarded on rollback.
+     */
+    public void addDeferredAction(final DeferredAction action) {
+        deferredActions.add(action);
+    }
+
+    /** All deferred actions in insertion order (for commit replay). */
+    public java.util.List<DeferredAction> getDeferredActions() {
+        return deferredActions;
+    }
+
+    /** Discard all deferred actions (on rollback). */
+    public void clearDeferredActions() {
+        deferredActions.clear();
+        nextVirtualId = -1;
+    }
+
+    /**
+     * Allocate a temporary virtual entity ID for a deferred summon.
+     * Returns negative values starting from -1, -2, -3, ...
+     * These IDs are valid only within the current Phase.
+     */
+    public int nextVirtualId() {
+        return nextVirtualId--;
+    }
+
+    public int deferredActionCount() { return deferredActions.size(); }
+    public boolean hasDeferredActions() { return !deferredActions.isEmpty(); }
+
+    // ================================================================
+    //  Write path (with rollback support)
+    // ================================================================
+
+    /**
+     * Store a block state in the cache.
+     * EXP3: if an old state is provided, it is recorded for potential rollback.
+     *
+     * @param pos      BlockPos.asLong()
+     * @param state    the new block state (null = air/removed)
+     */
+    public void putBlock(final long pos, final Object state) {
+        blockCache.put(pos, state);
+    }
+
+    /**
+     * EXP3: Store with old-state recording for rollback.
+     * Call this BEFORE the write executes, so the old state is captured.
+     *
+     * @param pos      BlockPos.asLong()
+     * @param newState the expected block state after write
+     * @param oldState the block state before the write (for rollback)
+     */
+    public void putBlock(final long pos, final Object newState, final Object oldState) {
+        blockCache.put(pos, newState);
+        if (oldState != null && !oldBlockStates.containsKey(pos)) {
+            oldBlockStates.put(pos, oldState); // only record first old state
+        }
+    }
+
+    public void markPendingWrite(final long pos) {
+        pendingWritePositions.add(pos);
+    }
+
+    public boolean hasPendingWrite(final long pos) {
+        return pendingWritePositions.contains(pos);
+    }
+
+    /**
+     * EXP3: Get old block states for rollback restoration.
+     */
+    public Map<Long, Object> getOldBlockStates() {
+        return oldBlockStates;
+    }
+
+    // ================================================================
+    //  EXP3: Savepoints (intra-Phase partial rollback)
+    // ================================================================
+
+    /**
+     * Create a savepoint at the current Phase state.
+     * Later, {@link #rollbackTo(Savepoint)} can restore to this point,
+     * discarding all cache/write/read changes made after the savepoint.
+     *
+     * @param cursorPos  current chain walker cursor (BlockPos.asLong())
+     * @param direction3d current chain direction (Direction.get3DDataValue())
+     * @return a Savepoint handle
+     */
+    public Savepoint createSavepoint(final long cursorPos, final int direction3d) {
+        final Savepoint sp = new Savepoint(
+            cursorPos, direction3d,
+            new HashMap<>(blockCache),
+            new HashSet<>(pendingWritePositions),
+            savepoints.size()
+        );
+        savepoints.push(sp);
+        return sp;
+    }
+
+    /**
+     * Rollback to a previously created savepoint. All block cache entries,
+     * pending write markers, and savepoints created AFTER the target are
+     * discarded.
+     *
+     * @param sp the savepoint to restore (must have been created in this Phase)
+     * @return true if rollback succeeded, false if savepoint not found
+     */
+    public boolean rollbackTo(final Savepoint sp) {
+        // Validate the savepoint belongs to this Phase
+        boolean found = false;
+        for (final Savepoint s : savepoints) {
+            if (s == sp) { found = true; break; }
+        }
+        if (!found) return false;
+
+        // Pop savepoints until we reach the target
+        while (!savepoints.isEmpty() && savepoints.peek() != sp) {
+            savepoints.pop();
+        }
+        if (!savepoints.isEmpty()) {
+            savepoints.pop(); // remove the target savepoint itself
+        }
+
+        // Restore cache state to savepoint snapshot
+        blockCache.clear();
+        blockCache.putAll(sp.blockCacheSnapshot);
+
+        // Restore pending writes
+        pendingWritePositions.clear();
+        pendingWritePositions.addAll(sp.pendingWritesSnapshot);
+
+        // Note: readSet and oldBlockStates are NOT rolled back because
+        // they represent "what actually happened" — rollback doesn't
+        // undo the fact that reads occurred.
+
+        return true;
+    }
+
+    /** Get the current savepoint depth. */
+    public int savepointDepth() {
+        return savepoints.size();
+    }
+
+    // ================================================================
+    //  EXP3: Irreversible operations
+    // ================================================================
+
+    /**
+     * Mark that this Phase contains an irreversible side-effect.
+     * Affects rollback strategy: data operations are compensated, but
+     * the irreversible operation (e.g. chat message) is left as-is.
+     */
+    public void markIrreversible() {
+        this.hasIrreversibleOps = true;
+    }
+
+    /** Whether this Phase has irreversible side-effects. */
+    public boolean hasIrreversibleOps() {
+        return hasIrreversibleOps;
+    }
+
+    // ================================================================
+    //  Serialization (for Continuation propagation)
+    // ================================================================
+
+    public long[] getPendingWritePositions() {
+        final long[] arr = new long[pendingWritePositions.size()];
+        int i = 0;
+        for (final long pos : pendingWritePositions) {
+            arr[i++] = pos;
+        }
+        return arr;
+    }
+
+    /**
+     * EXP3: Extract read set positions for Continuation propagation.
+     */
+    public long[] getReadSetPositions() {
+        final long[] arr = new long[readSet.size()];
+        int i = 0;
+        for (final long pos : readSet.keySet()) {
+            arr[i++] = pos;
+        }
+        return arr;
+    }
+
+    // ================================================================
+    //  EXP3: Retry (whole-Phase replay)
+    // ================================================================
+
+    /**
+     * EXP3: Reset this snapshot for a Phase retry.
+     * Clears caches, read-sets and savepoints so the replay re-reads the
+     * world (which has been restored to its pre-Phase state). Compensation
+     * baselines (oldBlockStates / oldScoreValues / nbtOldValues) are kept:
+     * {@code putIfAbsent} semantics preserve the very first pre-write values
+     * across replays.
+     */
+    public void resetForRetry() {
+        blockCache.clear();
+        pendingWritePositions.clear();
+        readSet.clear();
+        readSetValues.clear();
+        savepoints.clear();
+        scoreCache.clear();
+        pendingScoreKeys.clear();
+        scoreReadSet.clear();
+        scoreReadSetValues.clear();
+        nbtCache.clear();
+        nbtReadSet.clear();
+        nbtReadSetValues.clear();
+        entityReadSet.clear();
+        entityReadSetValues.clear();
+        deferredActions.clear();
+        nextVirtualId = -1;
+    }
+
+    // ================================================================
+    //  Introspection
+    // ================================================================
+
+    public long getSnapshotTick() { return snapshotTick; }
+    public int cacheSize() { return blockCache.size(); }
+    public int pendingWriteCount() { return pendingWritePositions.size(); }
+    public int readSetCount() { return readSet.size(); }
+    public int oldBlockStateCount() { return oldBlockStates.size(); }
+
+    // ================================================================
+    //  EXP3: Savepoint record
+    // ================================================================
+
+    /**
+     * A lightweight snapshot of Phase state at a point during Walking.
+     * Enables partial rollback when a late-Phase operation fails validation.
+     */
+    public static final class Savepoint {
+        /** Walker cursor position at savepoint time. */
+        public final long cursorPos;
+        /** Chain direction at savepoint time. */
+        public final int direction3d;
+        /** Shallow copy of block cache entries. */
+        final Map<Long, Object> blockCacheSnapshot;
+        /** Copy of pending write position set. */
+        final Set<Long> pendingWritesSnapshot;
+        /** Savepoint index (0 = first, increases with depth). */
+        public final int depth;
+
+        Savepoint(final long cursorPos, final int direction3d,
+                  final Map<Long, Object> blockCacheSnapshot,
+                  final Set<Long> pendingWritesSnapshot,
+                  final int depth) {
+            this.cursorPos = cursorPos;
+            this.direction3d = direction3d;
+            this.blockCacheSnapshot = blockCacheSnapshot;
+            this.pendingWritesSnapshot = pendingWritesSnapshot;
+            this.depth = depth;
+        }
+    }
+}

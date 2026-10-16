@@ -39,7 +39,9 @@ class Suite:
 
     # ── 小工具 ────────────────────────────────────────────
     def cmd(self, command, wait=0.3):
-        out = self.rc.cmd(command, wait=wait)
+        # Folia 基座下命令往返更慢；首包必须给长超时，否则响应滞留缓冲会造成协议错位
+        # （表现为 "Unknown or incomplete command" 与输出粘连）——分诊结论见 docs/12。
+        out = self.rc.cmd(command, wait=wait, first_wait=max(wait, 20.0))
         if self.verbose:
             print(f"    > {command}\n    < {out.strip()!r}")
         return out

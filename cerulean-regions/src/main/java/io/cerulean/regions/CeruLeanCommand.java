@@ -1,31 +1,35 @@
 package io.cerulean.regions;
 
-import com.mojang.brigadier.Command;
+
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.tree.LiteralCommandNode;
 
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
-
-import io.cerulean.regionizer.Region;
+import io.papermc.paper.threadedregions.RegionizedServer;
+import io.papermc.paper.threadedregions.TickRegions;
 
 import net.kyori.adventure.text.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 
 /**
- * 诊断命令 {@code /cerulean}：查看区域拓扑。
+ * CeruLean 在 **Folia 基座**上的诊断命令（收缩后的全部内容）。
  *
- * <p><b>注册方式照上游</b>：与 Paper 自己的 {@code /version}、{@code /plugins} 一样，
- * 走 Paper 的命令 API（{@code PaperCommands.registerCommands()} 里注册），而<b>不是</b>直接往
- * vanilla 调度器根节点加命令。原因：Paper 有个测试
- * （{@code MinecraftCommandPermissionsTest}）校验"调度器根命令 ↔ minecraft.command.* 权限"的
- * 一一对应，往根节点加命令会让它失败——上游自己的内部命令都因此走 API 注册。</p>
+ * <p><b>为什么收缩到只剩它</b>：Folia 26.3 的基座已经提供了区域化线程的全部实现
+ * （{@code ThreadedRegionizer} / {@code TickRegionScheduler} / region-aware {@code TickThread} /
+ * {@code scheduleChunkTaskEventually} / 由区域 tick 驱动票据处理），我们此前自研的
+ * 调度骨架（B1）、归属闸门（B2）、MC 侧接线（C2）都已被上游取代并删除。
+ * 本模块只保留**上游没有的、面向运维的只读诊断**：一条命令看区域拓扑与调度概况。</p>
+ *
+ * <p>只使用上游**公开** API：{@code ServerLevel.regioniser}（public 字段）、
+ * {@code ThreadedRegionizer.computeForAllRegions/computeForRegions}、
+ * {@code TickRegionScheduler.getTotalThreadCount()}、{@code RegionizedServer.getCurrentTick()}。</p>
  */
 public final class CeruLeanCommand {
 
-    public static final String DESCRIPTION = "CeruLean 区域拓扑诊断（/cerulean regions / regionat）";
+    public static final String DESCRIPTION = "CeruLean 区域诊断（Folia 基座）";
 
     /** 命令权限（Bukkit 权限名，注册进 Paper 的权限体系）。 */
     public static final String PERMISSION = "cerulean.command";
@@ -36,96 +40,95 @@ public final class CeruLeanCommand {
     public static LiteralCommandNode<CommandSourceStack> create() {
         return Commands.literal("cerulean")
             .requires(source -> source.getSender().hasPermission(PERMISSION))
-            .then(Commands.literal("selftest")
-                .then(Commands.literal("throw-in-tick")
-                    .executes(context -> {
-                        CeruLeanRegions.armThrowInTick();
-                        context.getSource().getSender().sendMessage(Component.text(
-                                "已武装：下一次区域 tick 将故意抛异常（用于验证 fail-stop 会停服）"));
-                        return 1;
-                    })))
-            .then(Commands.literal("ownership")
-                .executes(CeruLeanCommand::ownershipSummary)
-                .then(Commands.literal("verify")
-                    .then(Commands.argument("chunkX", IntegerArgumentType.integer())
-                        .then(Commands.argument("chunkZ", IntegerArgumentType.integer())
-                            .executes(CeruLeanCommand::ownershipVerify)))))
             .then(Commands.literal("regions")
                 .executes(CeruLeanCommand::listRegions))
             .then(Commands.literal("regionat")
                 .then(Commands.argument("chunkX", IntegerArgumentType.integer())
                     .then(Commands.argument("chunkZ", IntegerArgumentType.integer())
                         .executes(CeruLeanCommand::regionAt))))
+            .then(Commands.literal("dispatch")
+                .executes(CeruLeanCommand::dispatchStats))
+            .then(Commands.literal("exp")
+                .executes(CeruLeanCommand::expStats))
             .build();
     }
 
-    /** {@code /cerulean ownership}：策略 + "将会违规"的现场汇总（soft 模式用来生成 B5 工作清单）。 */
-    private static int ownershipSummary(final CommandContext<CommandSourceStack> context) {
-        context.getSource().getSender().sendMessage(
-                Component.text(CeruLeanOwnership.summary()));
-        CeruLeanOwnership.sites().entrySet().stream()
-                .sorted((a, b) -> Long.compare(b.getValue().get(), a.getValue().get()))
-                .limit(15)
-                .forEach(entry -> context.getSource().getSender().sendMessage(
-                        Component.text("  " + entry.getValue() + " × " + entry.getKey())));
-        return 1;
-    }
-
     /**
-     * {@code /cerulean ownership verify <chunkX> <chunkZ>}：端到端自检。
+     * {@code /cerulean dispatch}：投递原语的自检快照（T3 验收用）。
      *
-     * <p>把该位置的区域临时绑到一个假线程，再让本线程走真正的闸门
-     * {@code TickThread.ensureTickThread(...)}，看策略是否按预期放行/拒绝——
-     * 这是"补丁接上了、策略生效了"的决定性证据（off 应放行、strict 应抛异常）。</p>
+     * <p>要看的是 {@code callBlocking}——那是唯一还会阻塞调用方的地方，且只应该由
+     * {@code data get} 这类"命令契约要求同步返回值"的读取产生；写路径走
+     * {@code dispatch()}，投递即返回，不该在这里涨。</p>
      */
-    private static int ownershipVerify(final CommandContext<CommandSourceStack> context) {
-        final int chunkX = IntegerArgumentType.getInteger(context, "chunkX");
-        final int chunkZ = IntegerArgumentType.getInteger(context, "chunkZ");
-        // 这版 API 里 getExecutor() 是 Bukkit 实体、且没有 CommandSourceStack#getLevel()：
-        // 执行者所在世界优先，控制台/RCON 则退回主世界。
-        final org.bukkit.entity.Entity executor = context.getSource().getExecutor();
-        final ServerLevel level;
-        if (executor != null && executor.getWorld() instanceof org.bukkit.craftbukkit.CraftWorld craftWorld) {
-            level = craftWorld.getHandle();
-        } else {
-            level = MinecraftServer.getServer().overworld();
-        }
-        context.getSource().getSender().sendMessage(Component.text(
-                "归属自检: " + CeruLeanOwnership.verify(level, chunkX, chunkZ)));
+    /**
+     * {@code /cerulean exp}：EXP 链 walker 的自检快照。
+     *
+     * <p>挂起/恢复计数是"链真的被接上了"的唯一可观测证据：只有命令侧调用了
+     * {@code ExpChainSupport.registerDeferred}（SetBlockCommand 的 CeruLean 分支），
+     * walker 才会攒出待派发批次、在批边界挂起并恢复。</p>
+     */
+    private static int expStats(final CommandContext<CommandSourceStack> context) {
+        final StringBuilder out = new StringBuilder("CeruLean EXP 链自检");
+        out.append('\n').append("  上下文活跃 ").append(com.azurebranches.command.ExpChainSupport.isContextActive());
+        out.append(" / 模式 ").append(com.azurebranches.command.CommandBlockSupport.mode());
+        out.append('\n').append("  登记：内联 ").append(com.azurebranches.command.ExpChainSupport.inlineRegisteredCount())
+            .append(" / 跨区域 ").append(com.azurebranches.command.ExpChainSupport.deferredRegisteredCount());
+        out.append('\n').append("  挂起 ").append(com.azurebranches.command.ExpChainSupport.suspendedCount())
+            .append(" / 恢复 ").append(com.azurebranches.command.ExpChainSupport.resumedCount())
+            .append(" / 超时 ").append(com.azurebranches.command.ExpChainSupport.timeoutCount())
+            .append(" / 被取代 ").append(com.azurebranches.command.ExpChainSupport.supersededCount());
+        out.append('\n').append("  批上限 ").append(com.azurebranches.command.ExpChainSupport.maxBatchSize())
+            .append(" / 远程超时 ").append(com.azurebranches.command.ExpChainSupport.remoteTimeoutMs()).append("ms");
+        out.append('\n').append("  命令方块失败收容 ").append(com.azurebranches.command.CommandBlockSupport.containedFailureCount());
+        context.getSource().getSender().sendMessage(Component.text(out.toString()));
         return 1;
     }
 
+    private static int dispatchStats(final CommandContext<CommandSourceStack> context) {
+        context.getSource().getSender().sendMessage(Component.text("CeruLean 投递自检\n  " + AwaitableDispatch.stats()));
+        return 1;
+    }
+
+    /** {@code /cerulean regions}：调度线程数 + 每 world 的区域数与段参数。 */
     private static int listRegions(final CommandContext<CommandSourceStack> context) {
-        final io.cerulean.regionizer.RegionizerConfig cfg = CeruLeanRegions.config();
-        final StringBuilder out = new StringBuilder("CeruLean 区域拓扑")
-            .append("（段位移 ").append(cfg.regionShift)
-            .append(" / 段=").append(1 << cfg.regionShift).append(" 区块")
-            .append(" / 合并半径 ").append(cfg.mergeRadius).append(" 段")
-            .append(" / 邻居 ").append(cfg.neighbourhood).append('）');
+        final StringBuilder out = new StringBuilder("CeruLean 区域诊断（Folia 基座）");
+        out.append('\n').append("  调度线程 ")
+            .append(TickRegions.getScheduler() == null ? "未启动" : TickRegions.getScheduler().getTotalThreadCount())
+            .append(" / 当前 tick ").append(currentTickSafely());
         for (final ServerLevel level : MinecraftServer.getServer().getAllLevels()) {
-            out.append('\n').append("  ").append(level.ceruleanRegions.summary());
-            out.append('\n').append("  ").append(level.ceruleanRegions.scheduler().summary());
-            for (final String line : level.ceruleanRegions.detail(5)) {
-                out.append('\n').append("  ").append(line);
-            }
-            out.append('\n').append(level.ceruleanRegions.countersLine());
+            final int[] regions = {0};
+            level.regioniser.computeForAllRegions(region -> regions[0]++);
+            out.append('\n').append("  ").append(level.dimension().identifier())
+                .append(": 区域 ").append(regions[0])
+                .append(" / 段 ").append(level.regioniser.regionSectionChunkSize).append(" 区块")
+                .append(" / 合并半径 ").append(level.regioniser.regionSectionMergeRadius).append(" 段")
+                .append(" / 物化半径 ").append(level.regioniser.emptySectionCreateRadius);
         }
         context.getSource().getSender().sendMessage(Component.text(out.toString()));
-        return Command.SINGLE_SUCCESS;
+        return 1;
     }
 
+    /** {@code /cerulean regionat <chunkX> <chunkZ>}：该区块落在哪个区域（可能多个/无）。 */
     private static int regionAt(final CommandContext<CommandSourceStack> context) {
         final int chunkX = IntegerArgumentType.getInteger(context, "chunkX");
         final int chunkZ = IntegerArgumentType.getInteger(context, "chunkZ");
-        final ServerLevel level = context.getSource().getLocation().getWorld() == null
-            ? MinecraftServer.getServer().overworld()
-            : ((org.bukkit.craftbukkit.CraftWorld) context.getSource().getLocation().getWorld()).getHandle();
-        final Region<RegionData> region = level.ceruleanRegions.regionizer().getRegionAt(chunkX, chunkZ);
-        final String text = region == null
-            ? String.format("区块 (%d,%d) 不属于任何区域（段已消亡或未加载）", chunkX, chunkZ)
-            : String.format("区块 (%d,%d) → 区域 #%d（%s，段 %d / 区块 %d）",
-                chunkX, chunkZ, region.id(), region.state(), region.sectionCount(), region.chunkCount());
+        final ServerLevel level = MinecraftServer.getServer().overworld();
+        // 注意：ThreadedRegion.id 是**包内可见**（Folia 自己的代码同包才能读），
+        // 因此这里只报告"覆盖该区块的区域个数"，不暴露内部 id。
+        final int[] covering = {0};
+        level.regioniser.computeForRegions(chunkX, chunkZ, chunkX, chunkZ, region -> covering[0]++);
+        final String text = "区块 (" + chunkX + "," + chunkZ + ") → "
+                + (covering[0] == 0 ? "无区域" : "被 " + covering[0] + " 个区域覆盖");
         context.getSource().getSender().sendMessage(Component.text(text));
-        return Command.SINGLE_SUCCESS;
+        return 1;
+    }
+
+    /** {@code RegionizedServer.getCurrentTick()} 声明抛异常（非区域 tick 线程时），这里降级为"未知"。 */
+    private static String currentTickSafely() {
+        try {
+            return String.valueOf(RegionizedServer.getCurrentTick());
+        } catch (final Throwable ignored) {
+            return "未知（当前非区域 tick 线程）";
+        }
     }
 }

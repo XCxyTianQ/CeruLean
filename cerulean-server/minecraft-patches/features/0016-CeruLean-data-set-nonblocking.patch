@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Fri, 16 Oct 2026 17:19:47 +0800
+Subject: [PATCH] CeruLean data set: use the non-blocking dispatch primitive
+
+---
+T3：AwaitableDispatch 拆成两个原语后，把**写路径**改用非阻塞的 dispatch()。
+
+  * dispatch()：拥有者内联；否则 queueOrExecuteTickTask 后**立即返回**（不阻塞任何线程）。
+  * call()    ：仍会等待——但这是命令契约决定的，不是实现选择（见 0017 的定论说明）：
+                data get 的值要经 DedicatedServer.runCommand 同步返回给 RCON，
+                而它在读响应前只 join 了 global region 那一个任务。
+
+data set 不需要返回值 ⇒ 用 dispatch()，从此从区域线程发起跨区域写不再阻塞。
+---
+diff --git a/net/minecraft/server/commands/data/BlockDataAccessor.java b/net/minecraft/server/commands/data/BlockDataAccessor.java
+index 88cc6d9..653bb4e 100644
+--- a/net/minecraft/server/commands/data/BlockDataAccessor.java
++++ b/net/minecraft/server/commands/data/BlockDataAccessor.java
+@@ -57,7 +57,8 @@ public class BlockDataAccessor implements DataAccessor {
+     @Override
+     public void setData(final CompoundTag tag) {
+         // CeruLean start - 投递到拥有者：世界访问只能发生在拥有线程上
+-        io.cerulean.regions.AwaitableDispatch.run(this.level, this.pos, () -> {
++        // T3：写路径不需要返回值 ⇒ 用**非阻塞**的 dispatch()（投递后立即返回，不占用调用方线程）。
++        io.cerulean.regions.AwaitableDispatch.dispatch(this.level, this.pos, () -> {
+             try {
+                 final BlockEntity entity = this.entity();
+                 final BlockState state = this.level.getBlockState(this.pos);
+@@ -75,7 +76,9 @@ public class BlockDataAccessor implements DataAccessor {
+ 
+     @Override
+     public CompoundTag getData() {
+-        // CeruLean start - 读取同样投递到拥有者（data get 需要返回值 ⇒ awaitable）
++        // CeruLean start - 读取同样投递到拥有者；**这里必须等待**，因为 data get 的返回值要
++        // 经 DedicatedServer.runCommand → rconConsoleSource.getCommandResponse() 同步交给 RCON。
++        // 等待的不可消除性见 AwaitableDispatch 类文档 / docs/15 §T3（附代码路径证据）。
+         return io.cerulean.regions.AwaitableDispatch.call(this.level, this.pos, () -> {
+             try {
+                 return this.entity().saveWithFullMetadata(this.level.registryAccess());

@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Fri, 16 Oct 2026 17:09:29 +0800
+Subject: [PATCH] CeruLean re-enable scoreboard and clone command registration
+
+---
+Folia 为区域安全把 scoreboard / clone 的注册一并注释掉了（其 TODO）。本补丁先只放开
+注册，让它们从 "Unknown or incomplete command" 变成真实执路径，以便按 docs/14 §5
+的三步法暴露"参数解析期/执行期的世界访问"；区域安全化分别在 0015 / 0016 完成。
+---
+diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
+index c990a97..d8658fb 100644
+--- a/net/minecraft/commands/Commands.java
++++ b/net/minecraft/commands/Commands.java
+@@ -202,13 +202,15 @@ public class Commands {
+         ExecuteCommand.register(this.dispatcher, context);
+         //BossBarCommands.register(this.dispatcher, context); // Folia - region threading - TODO
+         ClearInventoryCommands.register(this.dispatcher, context);
+-        //CloneCommands.register(this.dispatcher, context); // Folia - region threading - TODO
++        // CeruLean - 重新启用 clone：见 0015-CeruLean-clone-owning-region.patch（区域安全化）
++        CloneCommands.register(this.dispatcher, context);
++        // CeruLean end - re-enable clone command
+         //ComputeCommand.register(this.dispatcher, context); // Folia - region threading - TODO
+         DamageCommand.register(this.dispatcher, context);
+         // CeruLean 重新启用 data 命令：Folia 因区域安全暂未注册它（见其 TODO），
+         // 我们已按上游 setblock 模板把方块数据读写投递到拥有该区块的区域线程
+         // （io.cerulean.regions.AwaitableDispatch + BlockDataAccessor），因此可以安全放开。
+-        // 注意：scoreboard / clone 仍未做区域安全化，**保持 Folia 的禁用状态**不动。
++        // 注意：scoreboard / clone 现由 0015/0016 做区域安全化后放开。
+         DataCommands.register(this.dispatcher, context);
+         // CeruLean end - re-enable data command
+         //DataPackCommand.register(this.dispatcher, context); // Folia - region threading - TODO
+@@ -249,7 +251,9 @@ public class Commands {
+         RotateCommand.register(this.dispatcher);
+         SayCommand.register(this.dispatcher);
+         //ScheduleCommand.register(this.dispatcher); // Folia - region threading
+-        //ScoreboardCommand.register(this.dispatcher, context); // Folia - region threading
++        // CeruLean - 重新启用 scoreboard：见 0016-CeruLean-scoreboard-region-safe.patch
++        ScoreboardCommand.register(this.dispatcher, context);
++        // CeruLean end - re-enable scoreboard command
+         SeedCommand.register(this.dispatcher, commandSelection != Commands.CommandSelection.INTEGRATED);
+         VersionCommand.register(this.dispatcher, commandSelection != Commands.CommandSelection.INTEGRATED);
+         SetBlockCommand.register(this.dispatcher, context);

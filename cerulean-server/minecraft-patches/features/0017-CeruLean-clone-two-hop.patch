@@ -1,0 +1,356 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Fri, 16 Oct 2026 17:35:20 +0800
+Subject: [PATCH] CeruLean clone: two-hop region-safe copy (cross-region + cross-dimension) with block-tick snapshot
+
+---
+R2：跨维度 clone 不可用（docs/15 §6.1）+ 一个顺带查出的语义错误。
+
+1) 跨维度：0015 把拷贝体投递到**目标维度**的区域线程，而拷贝体要读源维度的方块
+   ⇒ Level.getCurrentWorldData() 抛 "World mismatch"。改为**两跳**：
+     hopA 在源维度区域线程：读源方块/方块实体、MOVE 的源侧清除、抓方块刻快照；
+     hopB 在目标维度区域线程：先抓目标侧旧状态（任何写入之前），再落盘 + 应用方块刻。
+   两跳对同维度跨区域同样适用，且更正确（各区域只碰自己的区块）。
+
+2) 方块刻的语义错误：Folia 下 ServerLevel.getBlockTicks() 取的是**按区域划分**的容器
+   （ServerLevel:2219 → RegionizedWorldData#getBlockLevelTicks），而原版 CloneCommands 写的是
+     toDimension.getBlockTicks().copyAreaFrom(fromDimension.getBlockTicks(), from, offset)
+   ——在 from/to 同 level 且跨区域时，source 参数其实指向**目标区域自己的**容器，
+   于是"源区域里已排定的方块刻"不会被搬过去（单线程 vanilla 下两者是同一个容器，所以看不出问题）。
+   处理：给 LevelTicks 加 cerulean$snapshotArea(area) / cerulean$scheduleSnapshot(ticks, offset)
+   一对方法，逐行等价于 copyAreaFrom 的上下半段，把"读源"与"写目标"拆到各自区域线程上执行。
+
+验收：探针新增 5 条跨维度用例（overworld↔nether 双向 + 真拷断言）。
+---
+diff --git a/net/minecraft/server/commands/CloneCommands.java b/net/minecraft/server/commands/CloneCommands.java
+index 7e64017..9a929d9 100644
+--- a/net/minecraft/server/commands/CloneCommands.java
++++ b/net/minecraft/server/commands/CloneCommands.java
+@@ -32,6 +32,7 @@ import net.minecraft.world.level.gamerules.GameRules;
+ import net.minecraft.world.level.levelgen.structure.BoundingBox;
+ import net.minecraft.world.level.storage.TagValueInput;
+ import net.minecraft.world.level.storage.TagValueOutput;
++import net.minecraft.world.ticks.ScheduledTick;
+ import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+ 
+@@ -199,23 +200,35 @@ public class CloneCommands {
+             throw ERROR_FAILED.create();
+         }
+ 
+-        // CeruLean start - 区域安全：真正的拷贝体整体投递到**目标位置所在区域**的拥有线程。
+-        // 根因（实测栈，docs/15 §T2）：RCON 命令跑在 global region tick 线程上，而
+-        // Level.getCurrentWorldData() 只在"正在 tick 该 level 的区域线程"上非 null ⇒
+-        // Level.getBlockState 在 getCurrentWorldData().captureTreeGeneration 处 NPE。
+-        // 照上游 fill/setblock 的模板：投递 + 立即返回占位结果，结果消息由拥有者线程发出。
+-        if (io.cerulean.regions.AwaitableDispatch.owns(toDimension, destPos)) {
+-            // 调用方本来就是拥有者（例如同区域命令方块）⇒ 内联，异常照常传播给 Brigadier
+-            return cloneInOwningRegion(source, fromDimension, toDimension, from, destination, predicate, mode, strict);
+-        }
+-        io.cerulean.regions.AwaitableDispatch.dispatch(toDimension, destPos, () -> {
++        // CeruLean start - 区域安全（两跳）：世界访问必须发生在**正在 tick 该 level 的区域线程**上。
++        // 根因（实测栈，docs/15 §3）：RCON 命令跑在 global region tick 线程上，而
++        // Level.getCurrentWorldData() 只在区域 tick 上下文里非 null ⇒ Level.getBlockState NPE
++        // （栈：CloneCommands.clone:218 ← BlockInWorld.getState ← Level.getBlockState:1349）；
++        // 在别的 world 的区域线程上则抛 "World mismatch"。
++        //
++        // 两跳（源区域读 → 目标区域写）还顺带修掉一个语义错误：Folia 下 Level.getBlockTicks()
++        // 取的是**按区域划分**的容器（ServerLevel:2219 → RegionizedWorldData），
++        // 原先在目标区域线程上执行 toDimension.getBlockTicks().copyAreaFrom(fromDimension.getBlockTicks(), …)，
++        // 在 from/to 同 level 且跨区域时读到的其实是**目标区域自己的**容器
++        // ⇒ 源区域里已排定的方块刻不会被搬过去。故改为"源区域抓快照 → 目标区域应用"。
++        io.cerulean.regions.AwaitableDispatch.dispatch(fromDimension, startPos, () -> {
++            final CloneCommands.Clipboard clipboard;
+             try {
+-                cloneInOwningRegion(source, fromDimension, toDimension, from, destination, predicate, mode, strict);
++                clipboard = readClipboard(fromDimension, from, destination, predicate, mode, strict);
+             } catch (final CommandSyntaxException ex) {
+                 sendMessage(source, ex);
++                return;
+             }
++            io.cerulean.regions.AwaitableDispatch.dispatch(toDimension, destPos, () -> {
++                try {
++                    writeClipboard(source, toDimension, clipboard, strict);
++                } catch (final CommandSyntaxException ex) {
++                    sendMessage(source, ex);
++                }
++            });
+         });
+-        // 真实结果在拥有者线程上，由它自己 sendSuccess；这里与上游 fire-and-forget 一致地返回占位值。
++        // 真实结果在区域线程上算出、由它自己 sendSuccess；这里与上游 fill/setblock 的
++        // fire-and-forget 一致地返回占位值。
+         return 1;
+         // CeruLean end
+     }
+@@ -226,94 +239,124 @@ public class CloneCommands {
+     }
+     // CeruLean end - region threading
+ 
++    /** 源区域抓下来的载荷：纯数据，可以安全带过区域边界。 */
++    private record Clipboard(
++        List<CloneCommands.CloneBlockSource> solid,
++        List<CloneCommands.CloneBlockSource> blockEntities,
++        List<CloneCommands.CloneBlockSource> other,
++        BlockPos offset,
++        List<ScheduledTick<Block>> blockTicks
++    ) {
++    }
++
++    /** 读阶段条目：**目标侧旧状态不在这里**——它属于目标区域，只能在目标区域线程上读。 */
++    private record CloneBlockSource(
++        BlockPos pos, BlockState state, CloneCommands.@Nullable CloneBlockEntityInfo blockEntityInfo
++    ) {
++    }
++
+     /**
+-     * CeruLean：真正的拷贝体。**必须在目标位置所在区域的拥有线程上调用**——它读写方块状态、
+-     * 方块实体与方块刻，全都依赖 {@code Level.getCurrentWorldData()} 非 null。
++     * CeruLean：读阶段。**必须在源维度所在区域的拥有线程上执行**。
++     * 读源方块/方块实体，MOVE 模式下连源侧清除一起做（它写的也是源区域），
++     * 并把源区域的方块刻抓成纯数据快照。
+      */
+-    private static int cloneInOwningRegion(
+-        final CommandSourceStack source,
++    private static CloneCommands.Clipboard readClipboard(
+         final ServerLevel fromDimension,
+-        final ServerLevel toDimension,
+         final BoundingBox from,
+         final BoundingBox destination,
+         final Predicate<BlockInWorld> predicate,
+         final CloneCommands.Mode mode,
+         final boolean strict
+     ) throws CommandSyntaxException {
+-        List<CloneCommands.CloneBlockInfo> solidList = Lists.newArrayList();
+-        List<CloneCommands.CloneBlockInfo> blockEntitiesList = Lists.newArrayList();
+-        List<CloneCommands.CloneBlockInfo> otherBlocksList = Lists.newArrayList();
+-        Deque<BlockPos> clearBlocksList = Lists.newLinkedList();
+-        int count = 0;
+-        ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(LOGGER);
+-
+-        try {
+-            BlockPos offset = new BlockPos(destination.minX() - from.minX(), destination.minY() - from.minY(), destination.minZ() - from.minZ());
++        final List<CloneCommands.CloneBlockSource> solidList = Lists.newArrayList();
++        final List<CloneCommands.CloneBlockSource> blockEntitiesList = Lists.newArrayList();
++        final List<CloneCommands.CloneBlockSource> otherBlocksList = Lists.newArrayList();
++        final Deque<BlockPos> clearBlocksList = Lists.newLinkedList();
++        final BlockPos offset = new BlockPos(destination.minX() - from.minX(), destination.minY() - from.minY(), destination.minZ() - from.minZ());
+ 
++        try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(LOGGER)) {
+             for (int z = from.minZ(); z <= from.maxZ(); z++) {
+                 for (int y = from.minY(); y <= from.maxY(); y++) {
+                     for (int x = from.minX(); x <= from.maxX(); x++) {
+-                        BlockPos sourcePos = new BlockPos(x, y, z);
+-                        BlockPos destinationPos = sourcePos.offset(offset);
+-                        BlockInWorld block = new BlockInWorld(fromDimension, sourcePos, false);
+-                        BlockState blockState = block.getState();
+-                        if (predicate.test(block)) {
+-                            BlockEntity blockEntity = fromDimension.getBlockEntity(sourcePos);
+-                            if (blockEntity != null) {
+-                                TagValueOutput output = TagValueOutput.createWithContext(reporter.forChild(blockEntity.problemPath()), source.registryAccess());
+-                                blockEntity.saveCustomOnly(output);
+-                                CloneCommands.CloneBlockEntityInfo blockEntityInfo = new CloneCommands.CloneBlockEntityInfo(
+-                                    output.buildResult(), blockEntity.components()
+-                                );
+-                                blockEntitiesList.add(
+-                                    new CloneCommands.CloneBlockInfo(destinationPos, blockState, blockEntityInfo, toDimension.getBlockState(destinationPos))
+-                                );
+-                                clearBlocksList.addLast(sourcePos);
+-                            } else if (!blockState.isSolidRender() && !blockState.isCollisionShapeFullBlock(fromDimension, sourcePos)) {
+-                                otherBlocksList.add(
+-                                    new CloneCommands.CloneBlockInfo(destinationPos, blockState, null, toDimension.getBlockState(destinationPos))
+-                                );
+-                                clearBlocksList.addFirst(sourcePos);
+-                            } else {
+-                                solidList.add(new CloneCommands.CloneBlockInfo(destinationPos, blockState, null, toDimension.getBlockState(destinationPos)));
+-                                clearBlocksList.addLast(sourcePos);
+-                            }
++                        final BlockPos sourcePos = new BlockPos(x, y, z);
++                        final BlockPos destinationPos = sourcePos.offset(offset);
++                        final BlockInWorld block = new BlockInWorld(fromDimension, sourcePos, false);
++                        final BlockState blockState = block.getState();
++                        if (!predicate.test(block)) {
++                            continue;
++                        }
++                        final BlockEntity blockEntity = fromDimension.getBlockEntity(sourcePos);
++                        if (blockEntity != null) {
++                            final TagValueOutput output = TagValueOutput.createWithContext(reporter.forChild(blockEntity.problemPath()), fromDimension.registryAccess());
++                            blockEntity.saveCustomOnly(output);
++                            blockEntitiesList.add(new CloneCommands.CloneBlockSource(destinationPos, blockState,
++                                new CloneCommands.CloneBlockEntityInfo(output.buildResult(), blockEntity.components())));
++                            clearBlocksList.addLast(sourcePos);
++                        } else if (!blockState.isSolidRender() && !blockState.isCollisionShapeFullBlock(fromDimension, sourcePos)) {
++                            otherBlocksList.add(new CloneCommands.CloneBlockSource(destinationPos, blockState, null));
++                            clearBlocksList.addFirst(sourcePos);
++                        } else {
++                            solidList.add(new CloneCommands.CloneBlockSource(destinationPos, blockState, null));
++                            clearBlocksList.addLast(sourcePos);
+                         }
+                     }
+                 }
+             }
++        }
+ 
+-            int defaultUpdateFlags = 2 | (strict ? 816 : 0);
+-            if (mode == CloneCommands.Mode.MOVE) {
+-                for (BlockPos pos : clearBlocksList) {
+-                    fromDimension.setBlock(pos, Blocks.BARRIER.defaultBlockState(), defaultUpdateFlags | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
+-                }
++        if (mode == CloneCommands.Mode.MOVE) {
++            final int defaultUpdateFlags = 2 | (strict ? 816 : 0);
++            for (final BlockPos pos : clearBlocksList) {
++                fromDimension.setBlock(pos, Blocks.BARRIER.defaultBlockState(), defaultUpdateFlags | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
++            }
++            final int standardUpdateFlags = strict ? defaultUpdateFlags : Block.UPDATE_ALL;
++            for (final BlockPos pos : clearBlocksList) {
++                fromDimension.setBlock(pos, Blocks.AIR.defaultBlockState(), standardUpdateFlags);
++            }
++        }
+ 
+-                int standardUpdateFlags = strict ? defaultUpdateFlags : Block.UPDATE_ALL;
++        // 方块刻快照：原生的 copyAreaFrom 要求 source 与目标在**同一个区域容器**里；
++        // 跨区域/跨维度必须先在源区域抓成纯数据（见本方法头部说明）。
++        final List<ScheduledTick<Block>> blockTicks = fromDimension.getBlockTicks().cerulean$snapshotArea(from);
+ 
+-                for (BlockPos pos : clearBlocksList) {
+-                    fromDimension.setBlock(pos, Blocks.AIR.defaultBlockState(), standardUpdateFlags);
+-                }
+-            }
++        return new CloneCommands.Clipboard(solidList, blockEntitiesList, otherBlocksList, offset, blockTicks);
++    }
++
++    /**
++     * CeruLean：写阶段。**必须在目标位置所在区域的拥有线程上执行**。
++     * 目标侧旧状态在这里才抓（任何写入之前），然后照原版顺序落盘。
++     */
++    private static void writeClipboard(
++        final CommandSourceStack source,
++        final ServerLevel toDimension,
++        final CloneCommands.Clipboard clipboard,
++        final boolean strict
++    ) throws CommandSyntaxException {
++        final int defaultUpdateFlags = 2 | (strict ? 816 : 0);
++        final List<CloneCommands.CloneBlockInfo> solidList = withPreviousState(clipboard.solid(), toDimension);
++        final List<CloneCommands.CloneBlockInfo> blockEntitiesList = withPreviousState(clipboard.blockEntities(), toDimension);
++        final List<CloneCommands.CloneBlockInfo> otherBlocksList = withPreviousState(clipboard.other(), toDimension);
+ 
+-            List<CloneCommands.CloneBlockInfo> blockInfoList = Lists.newArrayList();
+-            blockInfoList.addAll(solidList);
+-            blockInfoList.addAll(blockEntitiesList);
+-            blockInfoList.addAll(otherBlocksList);
+-            List<CloneCommands.CloneBlockInfo> reverse = Lists.reverse(blockInfoList);
++        final List<CloneCommands.CloneBlockInfo> blockInfoList = Lists.newArrayList();
++        blockInfoList.addAll(solidList);
++        blockInfoList.addAll(blockEntitiesList);
++        blockInfoList.addAll(otherBlocksList);
++        final List<CloneCommands.CloneBlockInfo> reverse = Lists.reverse(blockInfoList);
+ 
+-            for (CloneCommands.CloneBlockInfo cloneInfo : reverse) {
++        int count = 0;
++        try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(LOGGER)) {
++            for (final CloneCommands.CloneBlockInfo cloneInfo : reverse) {
+                 toDimension.setBlock(cloneInfo.pos, Blocks.BARRIER.defaultBlockState(), defaultUpdateFlags | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
+             }
+ 
+-            for (CloneCommands.CloneBlockInfo cloneInfo : blockInfoList) {
++            for (final CloneCommands.CloneBlockInfo cloneInfo : blockInfoList) {
+                 if (toDimension.setBlock(cloneInfo.pos, cloneInfo.state, defaultUpdateFlags)) {
+                     count++;
+                 }
+             }
+ 
+-            for (CloneCommands.CloneBlockInfo cloneInfo : blockEntitiesList) {
+-                BlockEntity newBlockEntity = toDimension.getBlockEntity(cloneInfo.pos);
++            for (final CloneCommands.CloneBlockInfo cloneInfo : blockEntitiesList) {
++                final BlockEntity newBlockEntity = toDimension.getBlockEntity(cloneInfo.pos);
+                 if (cloneInfo.blockEntityInfo != null && newBlockEntity != null) {
+                     newBlockEntity.loadCustomOnly(
+                         TagValueInput.create(reporter.forChild(newBlockEntity.problemPath()), toDimension.registryAccess(), cloneInfo.blockEntityInfo.tag)
+@@ -326,30 +369,32 @@ public class CloneCommands {
+             }
+ 
+             if (!strict) {
+-                for (CloneCommands.CloneBlockInfo cloneInfo : reverse) {
++                for (final CloneCommands.CloneBlockInfo cloneInfo : reverse) {
+                     toDimension.updateNeighboursOnBlockSet(cloneInfo.pos, cloneInfo.previousStateAtDestination);
+                 }
+             }
+ 
+-            toDimension.getBlockTicks().copyAreaFrom(fromDimension.getBlockTicks(), from, offset);
+-        } catch (Throwable var36) {
+-            try {
+-                reporter.close();
+-            } catch (Throwable var35) {
+-                var36.addSuppressed(var35);
+-            }
+-
+-            throw var36;
++            toDimension.getBlockTicks().cerulean$scheduleSnapshot(clipboard.blockTicks(), clipboard.offset());
+         }
+ 
+-        reporter.close();
+         if (count == 0) {
+             throw ERROR_FAILED.create();
+         }
+ 
+-        int finalCount = count;
++        final int finalCount = count;
+         source.sendSuccess(() -> Component.translatable("commands.clone.success", finalCount), true);
+-        return count;
++    }
++
++    private static List<CloneCommands.CloneBlockInfo> withPreviousState(
++        final List<CloneCommands.CloneBlockSource> sources, final ServerLevel toDimension
++    ) {
++        final List<CloneCommands.CloneBlockInfo> out = Lists.newArrayListWithCapacity(sources.size());
++        for (final CloneCommands.CloneBlockSource entry : sources) {
++            out.add(new CloneCommands.CloneBlockInfo(
++                entry.pos(), entry.state(), entry.blockEntityInfo(), toDimension.getBlockState(entry.pos())
++            ));
++        }
++        return out;
+     }
+ 
+     private record CloneBlockEntityInfo(CompoundTag tag, DataComponentMap components) {
+diff --git a/net/minecraft/world/ticks/LevelTicks.java b/net/minecraft/world/ticks/LevelTicks.java
+index 52a7da0..21ee85d 100644
+--- a/net/minecraft/world/ticks/LevelTicks.java
++++ b/net/minecraft/world/ticks/LevelTicks.java
+@@ -347,6 +347,38 @@ public class LevelTicks<T> implements LevelTickAccess<T> {
+         );
+     }
+ 
++    // CeruLean start - 跨区域/跨维度搬运方块刻
++    // 原生 copyAreaFrom 假定 source 与 this 处于**同一个区域容器**：Folia 下 Level.getBlockTicks()
++    // 取的是按区域划分的容器（ServerLevel:2219 → RegionizedWorldData#getBlockLevelTicks），
++    // 于是跨区域调用时 source 参数要么指向错的容器、要么直接命中 "World mismatch"。
++    // 因此拆成"源区域抓纯数据快照 / 目标区域按快照排定"两步，语义与 copyAreaFrom 逐行等价。
++    public List<ScheduledTick<T>> cerulean$snapshotArea(final BoundingBox area) {
++        final List<ScheduledTick<T>> ticksToAdd = new ArrayList<>();
++        final Predicate<ScheduledTick<T>> tickInsideBB = t -> area.isInside(t.pos());
++        this.alreadyRunThisTick.stream().filter(tickInsideBB).forEach(ticksToAdd::add);
++        this.toRunThisTick.stream().filter(tickInsideBB).forEach(ticksToAdd::add);
++        this.forContainersInArea(area, (pos, container) -> container.getAll().filter(tickInsideBB).forEach(ticksToAdd::add));
++        return ticksToAdd;
++    }
++
++    /** 与 {@link #copyAreaFrom} 的下半段逐行等价（含 subTickOrder 重排）。 */
++    public void cerulean$scheduleSnapshot(final List<ScheduledTick<T>> ticks, final Vec3i offset) {
++        if (ticks.isEmpty()) {
++            return;
++        }
++        final LongSummaryStatistics info = ticks.stream().mapToLong(ScheduledTick::subTickOrder).summaryStatistics();
++        final long minSubTick = info.getMin();
++        final long maxSubTick = info.getMax();
++        ticks.forEach(
++            tick -> this.schedule(
++                new ScheduledTick<>(
++                    tick.type(), tick.pos().offset(offset), tick.triggerTick(), tick.priority(), tick.subTickOrder() - minSubTick + maxSubTick + 1L
++                )
++            )
++        );
++    }
++    // CeruLean end - 跨区域/跨维度搬运方块刻
++
+     @Override
+     public int count() {
+         return this.allContainers.values().stream().mapToInt(TickAccess::count).sum();

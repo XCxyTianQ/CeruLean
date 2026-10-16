@@ -1,0 +1,520 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Fri, 16 Oct 2026 19:44:02 +0800
+Subject: [PATCH] CeruLean scoreboard region safety: concurrent containers + sparse state lock
+
+---
+R1：Scoreboard 跨区域并发修复（docs/15 §4.3 记录的残余风险）。
+
+风险实测面（只读审计，reports/ 里的 scoreboard 报告）：
+  Scoreboard 有 **8 个结构性可变容器**（Object2ObjectOpenHashMap ×4、Reference2ObjectOpenHashMap ×2、
+  HashSet ×2），而且**在放开命令之前就已经被多类线程并发写**：
+    * 区域 tick 线程：ServerPlayer.awardStat / resetStat / awardKillScore / handleTeamKill /
+      updateScoreForCriteria → Scoreboard.forAllObjectives → getOrCreatePlayerScore；
+      ConversionType / Evoker / SummonEntityEffect 的团队成员变更；
+      **handleTeamKill 尤为典型：凶手所在区域线程会写受害者的 playerScores 条目**；
+    * global region tick 线程：scoreboard 命令（RCON/控制台跑在它上面，docs/15 §3）；
+    * 存档路径：MinecraftServer.saveGlobalData（自动存档时各区域线程仍在跑）。
+  并发结构性修改会丢条目 / 死循环 / CME。放开 scoreboard 命令等于在 global tick 线程上**再加一个写者**。
+
+两层修复：
+1) **结构性安全**：容器换并发实现（ConcurrentHashMap；criteria→objectives 的 List 换
+   CopyOnWriteArrayList —— 它极小、增删稀有、迭代在热路径上）。ObjectiveCriteria/Objective/PlayerTeam
+   均未重写 equals/hashCode ⇒ CHM 的身份语义与 Reference2Object* 一致。
+2) **复合操作原子性**：Scoreboard 内加一把**稀疏锁** stateLock，只保护"读-改-写"与多容器复合操作：
+   - ScoreAccess 的 set/add/display/numberFormatOverride/setLocked（读-改-写）；
+     其中 **add 被覆写**：默认实现是 `set(get()+count)` 两段式，两个区域线程同时 add 同一条分数
+     会丢更新，而 ServerPlayer.awardStat 正是区域线程上的 add；
+   - addObjective / removeObjective / resetAllPlayerScores / resetSinglePlayerScore；
+   - 队伍的 add/remove 复合操作；
+   - ServerScoreboard：trackedObjectives 换并发集合、dirty 改 volatile，
+     storeToSaveDataIfDirty 的"判定+快照+清零"进临界区（原两段式会丢一次存档）。
+   **不上热读路径**：Entity.getTeam() 这类每 tick 每实体都调的读仍是 CHM 的无锁读。
+   **通知移到锁外**：分数写入热路径的 onScoreChanged → broadcastAll 在释放锁之后才调用。
+   唯一例外是 removeObjective 清 display slot（走 ServerScoreboard.setDisplayObjective → broadcastAll），
+   它仍在锁内且已就地注明：那是管理命令、低频，且 connection.send 只是 Netty 异步写、不阻塞网络 I/O。
+
+顺带修正：Commands.java 里此前引用的 "0016-CeruLean-scoreboard-region-safe.patch" 并不存在
+（0016 实为 data-set-nonblocking）。该错误引用由只读审计发现，改指本补丁。
+
+**诚实边界**：本冒烟环境只有 1 个区域（force-load 的两个区块簇被并入同一区域），
+**无法构造真正的跨区域并发**，因此本补丁的并发正确性**没有压力测试背书**；
+可验证的是：功能回归（既有 43 项探针）+ 新增的顺序压力探针（add 累积精确、objective 反复增删、
+flush 存档往返）+ 编译期类型检查。真并发压测需要玩家/多区域环境。
+---
+diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
+index d8658fb..223a0d7 100644
+--- a/net/minecraft/commands/Commands.java
++++ b/net/minecraft/commands/Commands.java
+@@ -251,7 +251,10 @@ public class Commands {
+         RotateCommand.register(this.dispatcher);
+         SayCommand.register(this.dispatcher);
+         //ScheduleCommand.register(this.dispatcher); // Folia - region threading
+-        // CeruLean - 重新启用 scoreboard：见 0016-CeruLean-scoreboard-region-safe.patch
++        // CeruLean - 重新启用 scoreboard：注册本身即可（0014），区域安全化在
++        // 0022-CeruLean-scoreboard-region-safe.patch（Scoreboard 并发容器 + 稀疏锁）。
++        // 说明：早先这里写成 "0016-...-scoreboard-region-safe.patch" 是**错的**——
++        // 0016 实际是 data-set-nonblocking；该错误引用由只读审计发现并在此修正。
+         ScoreboardCommand.register(this.dispatcher, context);
+         // CeruLean end - re-enable scoreboard command
+         SeedCommand.register(this.dispatcher, commandSelection != Commands.CommandSelection.INTEGRATED);
+diff --git a/net/minecraft/server/ServerScoreboard.java b/net/minecraft/server/ServerScoreboard.java
+index 3c1d3c8..6f3061f 100644
+--- a/net/minecraft/server/ServerScoreboard.java
++++ b/net/minecraft/server/ServerScoreboard.java
+@@ -26,8 +26,10 @@ import org.jspecify.annotations.Nullable;
+ 
+ public class ServerScoreboard extends Scoreboard {
+     private final MinecraftServer server;
+-    private final Set<Objective> trackedObjectives = Sets.newHashSet();
+-    private boolean dirty;
++    // CeruLean：trackedObjectives 会被 onScoreChanged（区域线程）与命令（global tick 线程）并发改
++    private final Set<Objective> trackedObjectives = java.util.concurrent.ConcurrentHashMap.newKeySet();
++    // CeruLean：dirty 由多线程写；同时让 store-and-clear 相对状态写入原子（见 storeToSaveDataIfDirty）
++    private volatile boolean dirty;
+ 
+     public ServerScoreboard(final MinecraftServer server) {
+         this.server = server;
+@@ -218,9 +220,17 @@ public class ServerScoreboard extends Scoreboard {
+     }
+ 
+     public void storeToSaveDataIfDirty(final ScoreboardSaveData saveData) {
+-        if (this.dirty) {
+-            this.dirty = false;
+-            saveData.setData(this.store());
++        // CeruLean：原实现是"检查后清零"两段式，与区域线程的写入并发时会**丢掉一次存档**
++        // （不是损坏，但 scoreboard.dat 会落后）。放进 Scoreboard 的稀疏锁里，
++        // 让"判定 + 序列化快照 + 清零"相对其它状态写入成为临界区。
++        this.stateLock.lock();
++        try {
++            if (this.dirty) {
++                saveData.setData(this.store());
++                this.dirty = false;
++            }
++        } finally {
++            this.stateLock.unlock();
+         }
+     }
+ 
+diff --git a/net/minecraft/world/scores/PlayerScores.java b/net/minecraft/world/scores/PlayerScores.java
+index 1261101..37e5957 100644
+--- a/net/minecraft/world/scores/PlayerScores.java
++++ b/net/minecraft/world/scores/PlayerScores.java
+@@ -5,11 +5,14 @@ import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
+ import it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap;
+ import java.util.Collections;
+ import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
+ import java.util.function.Consumer;
+ import org.jspecify.annotations.Nullable;
+ 
+ class PlayerScores {
+-    private final Reference2ObjectOpenHashMap<Objective, Score> scores = new Reference2ObjectOpenHashMap<>(16, 0.5F);
++    // CeruLean：跨区域并发（区域线程的 awardStat 等 + global tick 线程的命令）⇒ 换并发容器。
++    // Objective 未重写 equals/hashCode ⇒ 身份语义与 Reference2ObjectOpenHashMap 一致。
++    private final Map<Objective, Score> scores = new ConcurrentHashMap<>();
+ 
+     public @Nullable Score get(final Objective objective) {
+         return this.scores.get(objective);
+diff --git a/net/minecraft/world/scores/PlayerTeam.java b/net/minecraft/world/scores/PlayerTeam.java
+index 2bdbb84..597626e 100644
+--- a/net/minecraft/world/scores/PlayerTeam.java
++++ b/net/minecraft/world/scores/PlayerTeam.java
+@@ -25,7 +25,8 @@ public class PlayerTeam extends Team {
+     private static final byte BIT_SEE_INVISIBLES = 2;
+     private final Scoreboard scoreboard;
+     private final String name;
+-    private final Set<String> players = Sets.newHashSet();
++    // CeruLean：跨区域并发（团队变换/实体转换都在区域线程上）⇒ 换并发集合
++    private final Set<String> players = java.util.concurrent.ConcurrentHashMap.newKeySet();
+     private Component displayName;
+     private Component playerPrefix = CommonComponents.EMPTY;
+     private Component playerSuffix = CommonComponents.EMPTY;
+diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
+index 4a15851..45a6eb4 100644
+--- a/net/minecraft/world/scores/Scoreboard.java
++++ b/net/minecraft/world/scores/Scoreboard.java
+@@ -16,6 +16,9 @@ import java.util.Collections;
+ import java.util.EnumMap;
+ import java.util.List;
+ import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.locks.ReentrantLock;
+ import java.util.Objects;
+ import java.util.function.Consumer;
+ import net.minecraft.network.chat.Component;
+@@ -30,12 +33,27 @@ import org.slf4j.Logger;
+ public class Scoreboard {
+     public static final String HIDDEN_SCORE_PREFIX = "#";
+     private static final Logger LOGGER = LogUtils.getLogger();
+-    private final Object2ObjectMap<String, Objective> objectivesByName = new Object2ObjectOpenHashMap<>(16, 0.5F);
+-    private final Reference2ObjectMap<ObjectiveCriteria, List<Objective>> objectivesByCriteria = new Reference2ObjectOpenHashMap<>();
+-    private final Map<String, PlayerScores> playerScores = new Object2ObjectOpenHashMap<>(16, 0.5F);
++    // CeruLean start - 区域安全（docs/17 §R1）
++    // Folia 是区域化多线程 tick，而 Scoreboard 是**跨区域共享**的容器：区域线程（实体 tick 里的
++    // ServerPlayer.awardStat/awardKillScore/handleTeamKill/updateScoreForCriteria → forAllObjectives）、
++    // global region tick 线程（scoreboard 命令）与存档路径都会碰它。原实现全是 fastutil 的
++    // Object2ObjectOpenHashMap / Reference2ObjectOpenHashMap / HashSet —— **结构性修改并发即损坏**
++    // （丢条目、死循环、CME）。
++    // 处理分两层：
++    //   1) 结构性安全：容器换成并发实现（弱一致迭代 + 原子 computeIfAbsent）；
++    //   2) 复合操作原子性：一把稀疏锁 stateLock，只保护"读-改-写"与多容器复合操作，
++    //      **不上热读路径**（Entity.getTeam() 这类每 tick 每实体都调的读仍是 CHM 的无锁读）。
++    // ObjectiveCriteria/Objective/PlayerTeam 都未重写 equals/hashCode ⇒ CHM 的身份语义与
++    // 原来的 Reference2Object* 一致。
++    private final Map<String, Objective> objectivesByName = new ConcurrentHashMap<>();
++    private final Map<ObjectiveCriteria, List<Objective>> objectivesByCriteria = new ConcurrentHashMap<>();
++    private final Map<String, PlayerScores> playerScores = new ConcurrentHashMap<>();
+     private final Map<DisplaySlot, Objective> displayObjectives = new EnumMap<>(DisplaySlot.class);
+-    private final Object2ObjectMap<String, PlayerTeam> teamsByName = new Object2ObjectOpenHashMap<>();
+-    private final Object2ObjectMap<String, PlayerTeam> teamsByPlayer = new Object2ObjectOpenHashMap<>();
++    private final Map<String, PlayerTeam> teamsByName = new ConcurrentHashMap<>();
++    private final Map<String, PlayerTeam> teamsByPlayer = new ConcurrentHashMap<>();
++    /** 复合操作的稀疏锁（见上方说明）。绝不在锁内做网络 I/O 之外的阻塞等待。 */
++    protected final ReentrantLock stateLock = new ReentrantLock();
++    // CeruLean end
+ 
+     public @Nullable Objective getObjective(final @Nullable String name) {
+         return this.objectivesByName.get(name);
+@@ -49,13 +67,19 @@ public class Scoreboard {
+         final boolean displayAutoUpdate,
+         final @Nullable NumberFormat numberFormat
+     ) {
+-        if (this.objectivesByName.containsKey(name)) {
+-            throw new IllegalArgumentException("An objective with the name '" + name + "' already exists!");
++        // CeruLean：containsKey + put 是复合操作，必须在锁内；通知移到锁外（避免锁内发包）
++        final Objective objective;
++        this.stateLock.lock();
++        try {
++            if (this.objectivesByName.containsKey(name)) {
++                throw new IllegalArgumentException("An objective with the name '" + name + "' already exists!");
++            }
++            objective = new Objective(this, name, criteria, displayName, renderType, displayAutoUpdate, numberFormat);
++            this.objectivesByCriteria.computeIfAbsent(criteria, k -> new CopyOnWriteArrayList<>()).add(objective);
++            this.objectivesByName.put(name, objective);
++        } finally {
++            this.stateLock.unlock();
+         }
+-
+-        Objective objective = new Objective(this, name, criteria, displayName, renderType, displayAutoUpdate, numberFormat);
+-        this.objectivesByCriteria.computeIfAbsent(criteria, k -> Lists.newArrayList()).add(objective);
+-        this.objectivesByName.put(name, objective);
+         this.onObjectiveAdded(objective);
+         return objective;
+     }
+@@ -83,29 +107,57 @@ public class Scoreboard {
+                 return score.value();
+             }
+ 
+-            @Override
+-            public void set(final int value) {
+-                if (!canModify) {
+-                    throw new IllegalStateException("Cannot modify read-only score");
+-                }
+-
+-                boolean hasChanged = requiresSync.isTrue();
+-                if (objective.displayAutoUpdate()) {
+-                    Component newDisplay = scoreHolder.getDisplayName();
+-                    if (newDisplay != null && !newDisplay.equals(score.display())) {
+-                        score.display(newDisplay);
++            /** CeruLean：读-改-写整体在锁内，通知在锁外（这是每条分数写入的热路径）。 */
++            private int mutate(final java.util.function.IntUnaryOperator op) {
++                final int newValue;
++                final boolean notify;
++                Scoreboard.this.stateLock.lock();
++                try {
++                    newValue = op.applyAsInt(score.value());
++                    boolean hasChanged = requiresSync.isTrue();
++                    if (objective.displayAutoUpdate()) {
++                        final Component newDisplay = scoreHolder.getDisplayName();
++                        if (newDisplay != null && !newDisplay.equals(score.display())) {
++                            score.display(newDisplay);
++                            hasChanged = true;
++                        }
++                    }
++                    if (newValue != score.value()) {
++                        score.value(newValue);
+                         hasChanged = true;
+                     }
++                    if (hasChanged) {
++                        requiresSync.setFalse();
++                    }
++                    notify = hasChanged;
++                } finally {
++                    Scoreboard.this.stateLock.unlock();
+                 }
++                if (notify) {
++                    Scoreboard.this.onScoreChanged(scoreHolder, objective, score);
++                }
++                return newValue;
++            }
+ 
+-                if (value != score.value()) {
+-                    score.value(value);
+-                    hasChanged = true;
++            @Override
++            public void set(final int value) {
++                if (!canModify) {
++                    throw new IllegalStateException("Cannot modify read-only score");
+                 }
++                this.mutate(previous -> value);
++            }
+ 
+-                if (hasChanged) {
+-                    this.sendScoreToPlayers();
++            /**
++             * CeruLean：默认实现是 {@code set(get() + count)} —— **两段式**，两个区域线程同时
++             * `add` 同一条分数会丢更新（ServerPlayer.awardStat 正是区域线程上的 add）。
++             * 这里覆写成同一把锁内完成。
++             */
++            @Override
++            public int add(final int count) {
++                if (!canModify) {
++                    throw new IllegalStateException("Cannot modify read-only score");
+                 }
++                return this.mutate(previous -> previous + count);
+             }
+ 
+             @Override
+@@ -115,16 +167,31 @@ public class Scoreboard {
+ 
+             @Override
+             public void display(final @Nullable Component display) {
+-                if (requiresSync.isTrue() || !Objects.equals(display, score.display())) {
+-                    score.display(display);
+-                    this.sendScoreToPlayers();
++                final boolean notify;
++                Scoreboard.this.stateLock.lock();
++                try {
++                    notify = requiresSync.isTrue() || !Objects.equals(display, score.display());
++                    if (notify) {
++                        score.display(display);
++                        requiresSync.setFalse();
++                    }
++                } finally {
++                    Scoreboard.this.stateLock.unlock();
++                }
++                if (notify) {
++                    Scoreboard.this.onScoreChanged(scoreHolder, objective, score);
+                 }
+             }
+ 
+             @Override
+             public void numberFormatOverride(final @Nullable NumberFormat numberFormat) {
+-                score.numberFormat(numberFormat);
+-                this.sendScoreToPlayers();
++                Scoreboard.this.stateLock.lock();
++                try {
++                    score.numberFormat(numberFormat);
++                } finally {
++                    Scoreboard.this.stateLock.unlock();
++                }
++                Scoreboard.this.onScoreChanged(scoreHolder, objective, score);
+             }
+ 
+             @Override
+@@ -143,18 +210,22 @@ public class Scoreboard {
+             }
+ 
+             private void setLocked(final boolean locked) {
+-                score.setLocked(locked);
+-                if (requiresSync.isTrue()) {
+-                    this.sendScoreToPlayers();
++                final boolean notify;
++                Scoreboard.this.stateLock.lock();
++                try {
++                    score.setLocked(locked);
++                    notify = requiresSync.isTrue();
++                    if (notify) {
++                        requiresSync.setFalse();
++                    }
++                } finally {
++                    Scoreboard.this.stateLock.unlock();
++                }
++                if (notify) {
++                    Scoreboard.this.onScoreChanged(scoreHolder, objective, score);
+                 }
+-
+                 Scoreboard.this.onScoreLockChanged(scoreHolder, objective);
+             }
+-
+-            private void sendScoreToPlayers() {
+-                Scoreboard.this.onScoreChanged(scoreHolder, objective, score);
+-                requiresSync.setFalse();
+-            }
+         };
+     }
+ 
+@@ -187,24 +258,39 @@ public class Scoreboard {
+     }
+ 
+     public void resetAllPlayerScores(final ScoreHolder player) {
+-        PlayerScores removed = this.playerScores.remove(player.getScoreboardName());
+-        if (removed != null) {
++        final boolean notify;
++        this.stateLock.lock();
++        try {
++            notify = this.playerScores.remove(player.getScoreboardName()) != null;
++        } finally {
++            this.stateLock.unlock();
++        }
++        if (notify) {
+             this.onPlayerRemoved(player);
+         }
+     }
+ 
+     public void resetSinglePlayerScore(final ScoreHolder player, final Objective objective) {
+-        PlayerScores scores = this.playerScores.get(player.getScoreboardName());
+-        if (scores != null) {
+-            boolean hasRemoved = scores.remove(objective);
+-            if (!scores.hasScores()) {
+-                PlayerScores removedPlayer = this.playerScores.remove(player.getScoreboardName());
+-                if (removedPlayer != null) {
+-                    this.onPlayerRemoved(player);
++        boolean removedPlayer = false;
++        boolean removedScore = false;
++        this.stateLock.lock();
++        try {
++            PlayerScores scores = this.playerScores.get(player.getScoreboardName());
++            if (scores != null) {
++                boolean hasRemoved = scores.remove(objective);
++                if (!scores.hasScores()) {
++                    removedPlayer = this.playerScores.remove(player.getScoreboardName()) != null;
++                } else if (hasRemoved) {
++                    removedScore = true;
+                 }
+-            } else if (hasRemoved) {
+-                this.onPlayerScoreRemoved(player, objective);
+             }
++        } finally {
++            this.stateLock.unlock();
++        }
++        if (removedPlayer) {
++            this.onPlayerRemoved(player);
++        } else if (removedScore) {
++            this.onPlayerScoreRemoved(player, objective);
+         }
+     }
+ 
+@@ -214,21 +300,29 @@ public class Scoreboard {
+     }
+ 
+     public void removeObjective(final Objective objective) {
+-        this.objectivesByName.remove(objective.getName());
+-
+-        for (DisplaySlot value : DisplaySlot.values()) {
+-            if (this.getDisplayObjective(value) == objective) {
+-                this.setDisplayObjective(value, null);
++        // CeruLean：多容器复合删除，整体在锁内；onObjectiveRemoved 移到锁外。
++        // 注意：清 display slot 会走 ServerScoreboard.setDisplayObjective → broadcastAll，
++        // 该广播仍在锁内（它只是 Netty 异步写，不是阻塞 I/O）；这条路径属管理命令、低频。
++        this.stateLock.lock();
++        try {
++            this.objectivesByName.remove(objective.getName());
++
++            for (DisplaySlot value : DisplaySlot.values()) {
++                if (this.getDisplayObjective(value) == objective) {
++                    this.setDisplayObjective(value, null);
++                }
+             }
+-        }
+ 
+-        List<Objective> objectives = this.objectivesByCriteria.get(objective.getCriteria());
+-        if (objectives != null) {
+-            objectives.remove(objective);
+-        }
++            List<Objective> objectives = this.objectivesByCriteria.get(objective.getCriteria());
++            if (objectives != null) {
++                objectives.remove(objective);
++            }
+ 
+-        for (PlayerScores playerScore : this.playerScores.values()) {
+-            playerScore.remove(objective);
++            for (PlayerScores playerScore : this.playerScores.values()) {
++                playerScore.remove(objective);
++            }
++        } finally {
++            this.stateLock.unlock();
+         }
+ 
+         this.onObjectiveRemoved(objective);
+@@ -252,30 +346,45 @@ public class Scoreboard {
+             LOGGER.warn("Requested creation of existing team '{}'", name);
+             return team;
+         } else {
+-            team = new PlayerTeam(this, name);
+-            this.teamsByName.put(name, team);
++            this.stateLock.lock();
++            try {
++                team = new PlayerTeam(this, name);
++                this.teamsByName.put(name, team);
++            } finally {
++                this.stateLock.unlock();
++            }
+             this.onTeamAdded(team);
+             return team;
+         }
+     }
+ 
+     public void removePlayerTeam(final PlayerTeam team) {
+-        this.teamsByName.remove(team.getName());
++        this.stateLock.lock();
++        try {
++            this.teamsByName.remove(team.getName());
+ 
+-        for (String player : team.getPlayers()) {
+-            this.teamsByPlayer.remove(player);
++            for (String player : team.getPlayers()) {
++                this.teamsByPlayer.remove(player);
++            }
++        } finally {
++            this.stateLock.unlock();
+         }
+ 
+         this.onTeamRemoved(team);
+     }
+ 
+     public boolean addPlayerToTeam(final String player, final PlayerTeam team) {
+-        if (this.getPlayersTeam(player) != null) {
+-            this.removePlayerFromTeam(player);
+-        }
++        this.stateLock.lock();
++        try {
++            if (this.getPlayersTeam(player) != null) {
++                this.removePlayerFromTeam(player);
++            }
+ 
+-        this.teamsByPlayer.put(player, team);
+-        return team.getPlayers().add(player);
++            this.teamsByPlayer.put(player, team);
++            return team.getPlayers().add(player);
++        } finally {
++            this.stateLock.unlock();
++        }
+     }
+ 
+     public boolean removePlayerFromTeam(final String player) {
+@@ -289,12 +398,17 @@ public class Scoreboard {
+     }
+ 
+     public void removePlayerFromTeam(final String player, final PlayerTeam team) {
+-        if (this.getPlayersTeam(player) != team) {
+-            throw new IllegalStateException("Player is either on another team or not on any team. Cannot remove from team '" + team.getName() + "'.");
+-        }
++        this.stateLock.lock();
++        try {
++            if (this.getPlayersTeam(player) != team) {
++                throw new IllegalStateException("Player is either on another team or not on any team. Cannot remove from team '" + team.getName() + "'.");
++            }
+ 
+-        this.teamsByPlayer.remove(player);
+-        team.getPlayers().remove(player);
++            this.teamsByPlayer.remove(player);
++            team.getPlayers().remove(player);
++        } finally {
++            this.stateLock.unlock();
++        }
+     }
+ 
+     public Collection<String> getTeamNames() {

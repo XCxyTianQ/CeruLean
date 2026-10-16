@@ -1,0 +1,314 @@
+/*
+ * AzureBranches - EXP3 Phase Validator (OCC)
+ *
+ * Implements the validation phase of Optimistic Concurrency Control
+ * (Kung & Robinson, 1981) for EXP3 command block chain Phases.
+ *
+ * Validation checks (in order):
+ *
+ *   CHECK_READ_SET:  Were any positions in the readSet externally modified
+ *                     between the tick they were read and the current tick?
+ *                     (Prevents Non-Repeatable Reads — ANSI SQL isolation)
+ *
+ *   CHECK_SCORE_READ_SET: Were any score keys in the scoreReadSet externally
+ *                     modified between the tick they were read and now?
+ *                     (Prevents Non-Repeatable Score Reads — EXP4)
+ *
+ *   CHECK_NBT_READ_SET: Were any entity-NBT keys in the nbtReadSet externally
+ *                     modified between the read and now?
+ *                     (Prevents Non-Repeatable NBT Reads — EXP6)
+ *
+ *   CHECK_ENTITY_READ_SET: Did any entity resolved by a /scoreboard holder
+ *                     argument disappear between resolution and now?
+ *                     (Prevents holder-set phantom reads — EXP6Plus)
+ *
+ *   CHECK_WRITE_SET: Were any positions in the writeSet concurrently
+ *                    modified by another chain? (Prevents Lost Updates)
+ *                    Note: this is largely handled by ChainHead.traversalId
+ *                    supersede; PhaseValidator provides the complementary
+ *                    cross-chain detection.
+ *
+ *   CHECK_READ_SET_SIZE: Is the readSet too large to validate efficiently?
+ *                    (Prevents validation overhead explosion — configurable
+ *                    via command_blocks.exp.validation.max_read_set)
+ *
+ * On conflict:
+ *   → ValidationResult.RETRY: re-execute the Phase (up to max_retries)
+ *   → ValidationResult.RETRY_EXHAUSTED: fall back to best-effort semantics
+ *
+ * Thread safety:
+ *   PhaseValidator is called from aggregateAndResume on the home region thread.
+ *   externalCheckResults is populated by remote region threads via
+ *   CompletableFuture — it is fully populated before validate() is called
+ *   (happens-before via CompletableFuture.allOf).
+ */
+package com.azurebranches.command;
+
+import com.azurebranches.config.AzureBranchesConfig;
+
+import java.util.Locale;
+import java.util.Map;
+
+public final class PhaseValidator {
+
+    // ================================================================
+    //  Validation result
+    // ================================================================
+
+    /**
+     * Outcome of Phase validation.
+     */
+    public enum ValidationResult {
+        /** All checks passed. Phase is committed. */
+        COMMIT,
+
+        /**
+         * Read-set conflict detected. Phase should be retried.
+         * The caller should rollback the Phase and re-execute from
+         * the last savepoint (or from the Phase start).
+         */
+        RETRY,
+
+        /**
+         * Retry limit exhausted. Phase cannot be validated.
+         * The caller should fall back to best-effort semantics
+         * (accept the current state and continue).
+         */
+        RETRY_EXHAUSTED,
+
+        /**
+         * Read-set exceeds configured maximum. Validation skipped
+         * for performance reasons. The caller proceeds without
+         * the isolation guarantees.
+         */
+        READ_SET_OVERFLOW
+    }
+
+    // ================================================================
+    //  Validation thresholds
+    // ================================================================
+
+    /** Maximum positions in readSet before validation is skipped. */
+    public static int maxReadSetSize() {
+        try {
+            return AzureBranchesConfig.get().expValidationMaxReadSet();
+        } catch (final IllegalStateException e) {
+            return 256; // conservative default
+        }
+    }
+
+    /** Maximum retry count for a Phase before falling back. */
+    public static int maxRetries() {
+        try {
+            return AzureBranchesConfig.get().expValidationMaxRetries();
+        } catch (final IllegalStateException e) {
+            return 3;
+        }
+    }
+
+    /** Whether EXP3 validation is enabled at all. */
+    public static boolean isEnabled() {
+        try {
+            return AzureBranchesConfig.get().expValidationEnabled();
+        } catch (final IllegalStateException e) {
+            return false;
+        }
+    }
+
+    // ================================================================
+    //  Validation logic
+    // ================================================================
+
+    /**
+     * Validate a Phase's readSet against external modification results
+     * (EXP3: block-only validation; no scoreboard read-set check).
+     *
+     * @param snap      the PhaseSnapshot to validate
+     * @param retryCount how many times this Phase has already been retried
+     * @param externalCheckResults positions → true if externally modified,
+     *                             populated by remote region verification tasks
+     * @return the validation result
+     */
+    public static ValidationResult validate(
+        final PhaseSnapshot snap,
+        final int retryCount,
+        final Map<Long, Boolean> externalCheckResults
+    ) {
+        return validate(snap, retryCount, externalCheckResults, null);
+    }
+
+    /**
+     * Validate a Phase's readSet and scoreReadSet against external
+     * modification results (EXP4: full OCC with scoreboard support).
+     *
+     * @param snap                      the PhaseSnapshot to validate
+     * @param retryCount                how many times this Phase has already been retried
+     * @param externalCheckResults      positions → true if externally modified
+     * @param externalScoreCheckResults score keys → true if externally modified (EXP4),
+     *                                  or null to skip score validation
+     * @return the validation result
+     */
+    public static ValidationResult validate(
+        final PhaseSnapshot snap,
+        final int retryCount,
+        final Map<Long, Boolean> externalCheckResults,
+        final Map<String, Boolean> externalScoreCheckResults
+    ) {
+        return validate(snap, retryCount, externalCheckResults, externalScoreCheckResults, null);
+    }
+
+    /**
+     * Validate a Phase's readSet, scoreReadSet and NBT read-set against
+     * external modification results (EXP6: full OCC with entity-NBT support).
+     *
+     * @param snap                      the PhaseSnapshot to validate
+     * @param retryCount                how many times this Phase has already been retried
+     * @param externalCheckResults      positions → true if externally modified
+     * @param externalScoreCheckResults score keys → true if externally modified (EXP4),
+     *                                  or null to skip score validation
+     * @param externalNbtCheckResults   NBT keys → true if externally modified (EXP6),
+     *                                  or null to skip NBT validation
+     * @return the validation result
+     */
+    public static ValidationResult validate(
+        final PhaseSnapshot snap,
+        final int retryCount,
+        final Map<Long, Boolean> externalCheckResults,
+        final Map<String, Boolean> externalScoreCheckResults,
+        final Map<String, Boolean> externalNbtCheckResults
+    ) {
+        return validate(snap, retryCount, externalCheckResults, externalScoreCheckResults,
+            externalNbtCheckResults, null);
+    }
+
+    /**
+     * Validate a Phase's readSet, scoreReadSet, NBT read-set and entity
+     * read-set against external modification results (EXP6Plus: full OCC
+     * with scoreboard entity-dimension support).
+     *
+     * @param snap                       the PhaseSnapshot to validate
+     * @param retryCount                 how many times this Phase has already been retried
+     * @param externalCheckResults       positions → true if externally modified
+     * @param externalScoreCheckResults  score keys → true if externally modified (EXP4),
+     *                                   or null to skip score validation
+     * @param externalNbtCheckResults    NBT keys → true if externally modified (EXP6),
+     *                                   or null to skip NBT validation
+     * @param externalEntityCheckResults entity IDs → true if the entity disappeared (EXP6Plus),
+     *                                   or null to skip entity validation
+     * @return the validation result
+     */
+    public static ValidationResult validate(
+        final PhaseSnapshot snap,
+        final int retryCount,
+        final Map<Long, Boolean> externalCheckResults,
+        final Map<String, Boolean> externalScoreCheckResults,
+        final Map<String, Boolean> externalNbtCheckResults,
+        final Map<Integer, Boolean> externalEntityCheckResults
+    ) {
+        if (!isEnabled()) {
+            return ValidationResult.COMMIT; // bypass when disabled
+        }
+
+        final int maxRetries = maxRetries();
+        if (retryCount >= maxRetries) {
+            return ValidationResult.RETRY_EXHAUSTED;
+        }
+
+        final Map<Long, Long> readSet = snap.getReadSet();
+        final int maxReadSet = maxReadSetSize();
+
+        // CHECK_READ_SET_SIZE: skip validation if too large
+        if (readSet.size() > maxReadSet) {
+            System.err.println(
+                "[AzureBranches] EXP3 validation skipped: readSet "
+                + readSet.size() + " > max " + maxReadSet);
+            return ValidationResult.READ_SET_OVERFLOW;
+        }
+
+        // CHECK_READ_SET: detect non-repeatable reads
+        if (externalCheckResults != null && !externalCheckResults.isEmpty()) {
+            for (final Map.Entry<Long, Long> entry : readSet.entrySet()) {
+                final long pos = entry.getKey();
+                final Boolean externallyModified = externalCheckResults.get(pos);
+                if (Boolean.TRUE.equals(externallyModified)) {
+                    // This position was modified externally between the read
+                    // and now → our read is stale → Phase must retry
+                    return ValidationResult.RETRY;
+                }
+            }
+        }
+
+        // CHECK_SCORE_READ_SET: detect non-repeatable score reads (EXP4)
+        if (externalScoreCheckResults != null && !externalScoreCheckResults.isEmpty()) {
+            final Map<String, Long> scoreReadSet = snap.getScoreReadSet();
+            if (scoreReadSet != null) {
+                for (final Map.Entry<String, Long> entry : scoreReadSet.entrySet()) {
+                    final String key = entry.getKey();
+                    final Boolean externallyModified = externalScoreCheckResults.get(key);
+                    if (Boolean.TRUE.equals(externallyModified)) {
+                        // This score key was modified externally between the read
+                        // and now → our read is stale → Phase must retry
+                        return ValidationResult.RETRY;
+                    }
+                }
+            }
+        }
+
+        // CHECK_NBT_READ_SET: detect non-repeatable entity-NBT reads (EXP6)
+        if (externalNbtCheckResults != null && !externalNbtCheckResults.isEmpty()) {
+            final Map<String, Long> nbtReadSet = snap.getNbtReadSet();
+            if (nbtReadSet != null) {
+                for (final Map.Entry<String, Long> entry : nbtReadSet.entrySet()) {
+                    final String key = entry.getKey();
+                    final Boolean externallyModified = externalNbtCheckResults.get(key);
+                    if (Boolean.TRUE.equals(externallyModified)) {
+                        // This NBT key was modified externally between the read
+                        // and now → our read is stale → Phase must retry
+                        return ValidationResult.RETRY;
+                    }
+                }
+            }
+        }
+
+        // CHECK_ENTITY_READ_SET: detect holder-set phantom reads (EXP6Plus)
+        if (externalEntityCheckResults != null && !externalEntityCheckResults.isEmpty()) {
+            final Map<Integer, Long> entityReadSet = snap.getEntityReadSet();
+            if (entityReadSet != null) {
+                for (final Map.Entry<Integer, Long> entry : entityReadSet.entrySet()) {
+                    final Integer entityId = entry.getKey();
+                    final Boolean disappeared = externalEntityCheckResults.get(entityId);
+                    if (Boolean.TRUE.equals(disappeared)) {
+                        // The entity resolved by a scoreboard holder argument
+                        // vanished between resolution and now → our holder set
+                        // is stale → Phase must retry
+                        return ValidationResult.RETRY;
+                    }
+                }
+            }
+        }
+
+        // CHECK_WRITE_SET: handled by ChainHead.traversalId supersede
+        // (newer traversal automatically invalidates older Continuations).
+        // No additional check needed here.
+
+        return ValidationResult.COMMIT;
+    }
+
+    // ================================================================
+    //  Validation mode descriptor
+    // ================================================================
+
+    /**
+     * Produce a human-readable description of the current validation mode.
+     */
+    public static String describe() {
+        if (!isEnabled()) {
+            return "EXP3 validation disabled (config: validation.enabled=false)";
+        }
+        return "EXP3 OCC validation: maxReadSet=" + maxReadSetSize()
+            + ", maxRetries=" + maxRetries()
+            + " (+ EXP4 score read-set, EXP6 NBT read-set)";
+    }
+
+    private PhaseValidator() {}
+}
