@@ -35,3 +35,6 @@ smoke-load-report/
 smoke-config-report*/
 smoke-dbg/
 smoke-threads*/
+smoke-cmdprobe/
+smoke-triage/
+smoke-folia-report/
