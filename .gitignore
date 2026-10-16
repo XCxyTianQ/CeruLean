@@ -17,7 +17,8 @@ build
 .idea/
 *.iml
 
-# 冒烟测试运行目录与报告
+# 冒烟测试运行目录与报告（smoke-*/ 覆盖所有冒烟运行目录：世界数据 + paperclip 解包 + 31MB jar，绝不入库）
+smoke-*/
 smoke-run/
 smoke-report/
 smoke-config-report/

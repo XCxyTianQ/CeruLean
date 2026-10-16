@@ -1,4 +1,0 @@
-== B2 压载观测（ownership-check = strict）
-  ✗ 压载过程中通道断开: BrokenPipeError: [Errno 32] Broken pipe
-
-MODE=strict VIOLATIONS=0 SITES=0 LOAD_SECONDS=17.8 SURVIVED=0

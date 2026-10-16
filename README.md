@@ -2,7 +2,7 @@
   <img src="assets/icon.png" width="200" alt="CeruLean Cores">
   <h1>CeruLean Cores</h1>
   <p><b>面向「半投入生产」的 Minecraft 服务端发行版</b><br>
-  以 Paper 为基座 · 自研区域化并行 tick · 目标：区域化下的命令方块语义完整性</p>
+  以 Folia 26.3 为基座 · 区域化并行 tick · 目标：区域化下的命令方块语义完整性</p>
   <p>
     <code>Minecraft 26.3</code> · <code>Java 25</code> · <code>GPLv3</code> · 构建形态：paperweight patch-only fork
   </p>
@@ -11,6 +11,13 @@
 ---
 
 ## 这是什么
+
+> **⚠️ 基座身份变更（2026-10-16）**：本项目基座已从 **Paper 主线** 换成 **Folia 26.3**。
+> 区域化运行时不再自研（原 B1/B2/C2 路线已按路线 A 收缩掉，`cerulean-regions` 只剩诊断命令）；
+> 上游 Folia 已提供 `ThreadedRegionizer` / `TickRegionScheduler` / region-aware `TickThread`。
+> 当前进度与验收记录见 `docs/14`（T1–T7 交接）、`docs/15`（T1–T3）、`docs/16`（T4）、`docs/17`（R1/R2）。
+> **下文 §"为什么自己做区域化" 属历史路线，已被上述变更取代，保留以便追溯决策。**
+
 
 CeruLean Cores 是一个 Minecraft Java 版服务端发行版。它**不是**又一个"加了一堆优化补丁"的 Paper 下游，而是想解决一个具体而难的问题：
 
@@ -30,7 +37,7 @@ CeruLean Cores 是一个 Minecraft Java 版服务端发行版。它**不是**又
 
 ## 当前状态
 
-**诚实说明：本仓库目前是 Paper 的干净下游 fork，区域化尚未实现。**
+**当前状态（2026-10-16）**：基座已是 **Folia 26.3**（区域化由上游提供），命令复活（`data`/`scoreboard`/`clone`）与 **EXP 可挂起命令方块链**均已落地并实测通过；验收套件分层为 L0/L1/L2（`tools/smoke/run_suite.py`）。
 
 | 能力 | 状态 |
 |---|---|

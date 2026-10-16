@@ -1,7 +1,0 @@
-== B2 压载观测（ownership-check = soft）
-  压载后拓扑: minecraft:overworld: 区域 1 / 段 23（存活 23）/ 区块 772 / 最大区域 #13(23 段) /   EDF 调度：线程 2 / 注册 15 / 已完成 1534
-  归属校验: SOFT / 将会违规 10 次 / 不同现场 2 个
-     现场: 9 × ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor:155
-     现场: 1 × ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor:193
-
-MODE=soft VIOLATIONS=10 SITES=2 LOAD_SECONDS=23.5 SURVIVED=1
