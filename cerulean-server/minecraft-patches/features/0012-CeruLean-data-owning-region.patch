@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Thu, 16 Oct 2026 00:00:00 +0800
+Subject: [PATCH] CeruLean data command: dispatch block data access to the owning region
+
+---
+Folia 26.3 已给 setblock 做了跨区域投递（queueOrExecuteTickTask），但 data/clone/scoreboard 没有。
+本补丁按同一模板，把 data 的方块读写投递到拥有该区块的区域线程（读需要返回值 ⇒ awaitable）。
+---
+diff --git a/net/minecraft/server/commands/data/BlockDataAccessor.java b/net/minecraft/server/commands/data/BlockDataAccessor.java
+index 9542b4c..e9ff5d4 100644
+--- a/net/minecraft/server/commands/data/BlockDataAccessor.java
++++ b/net/minecraft/server/commands/data/BlockDataAccessor.java
+@@ -45,18 +45,25 @@ public class BlockDataAccessor implements DataAccessor {
+ 
+     @Override
+     public void setData(final CompoundTag tag) {
+-        BlockState state = this.entity.getLevel().getBlockState(this.pos);
++        // CeruLean start - 投递到拥有该区块的区域线程（EXP 移植对齐件）
++        io.cerulean.regions.AwaitableDispatch.run(this.entity.getLevel(), this.pos, () -> {
++            BlockState state = this.entity.getLevel().getBlockState(this.pos);
+ 
+-        try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(this.entity.problemPath(), LOGGER)) {
+-            this.entity.loadWithComponents(TagValueInput.create(reporter, this.entity.getLevel().registryAccess(), tag));
+-            this.entity.setChanged();
+-            this.entity.getLevel().sendBlockUpdated(this.pos, state, state, Block.UPDATE_ALL);
+-        }
++            try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(this.entity.problemPath(), LOGGER)) {
++                this.entity.loadWithComponents(TagValueInput.create(reporter, this.entity.getLevel().registryAccess(), tag));
++                this.entity.setChanged();
++                this.entity.getLevel().sendBlockUpdated(this.pos, state, state, Block.UPDATE_ALL);
++            }
++        });
++        // CeruLean end
+     }
+ 
+     @Override
+     public CompoundTag getData() {
+-        return this.entity.saveWithFullMetadata(this.entity.getLevel().registryAccess());
++        // CeruLean start - 读取同样要投递到拥有者（data get 需要返回值 ⇒ awaitable）
++        return io.cerulean.regions.AwaitableDispatch.call(this.entity.getLevel(), this.pos,
++                () -> this.entity.saveWithFullMetadata(this.entity.getLevel().registryAccess()));
++        // CeruLean end
+     }
+ 
+     @Override
