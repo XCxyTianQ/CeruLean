@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Fri, 16 Oct 2026 17:42:26 +0800
+Subject: [PATCH] CeruLean initialize AzureBranches config at server construction
+
+---
+T4 Step 0（硬前置）。AzureBranchesConfig 从未被初始化：全仓没有 init 调用点，而
+CommandBlockSupport.mode() 在未初始化时捕获 IllegalStateException 并返回 SAFE
+⇒ command_blocks.mode=EXP 永远不可达，且**静默降级不报错**（极易误判为"补丁没生效"）。
+
+锚点与 upstream 的 0009-AzureBranches-config-init.patch 相同：MinecraftServer 构造函数里
+`this.paperConfigurations = services.paper().configurations();` 之后。
+upstream 同时调的 EntityLimiter.init() 未搬入 CeruLean，故只接 Config。
+
+配置落盘：进程 cwd 下的 azurebranches_global_config.toml（冒烟起服目录即 ./smoke-xxx/）。
+验收：起服后该文件出现且含 command_blocks.mode = "SAFE"；既有探针全绿（默认 SAFE 行为不变）。
+---
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 8c26b71..4d20afb 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -595,6 +595,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         Runtime.getRuntime().addShutdownHook(new org.bukkit.craftbukkit.util.ServerShutdownThread(this));
+         // CraftBukkit end
+         this.paperConfigurations = services.paper().configurations(); // Paper - add paper configuration files
++        // CeruLean start - AzureBranches 配置初始化（命令方块模式等）
++        // 必须在任何 CommandBlockSupport.mode() 之前：未初始化时 CommandBlockSupport 会**静默降级**
++        // 成 SAFE（它捕获 IllegalStateException），那样 EXP 分支永远不可达且不报错，极易被误判为
++        // "补丁没生效"（见 docs/16 §T4 Step 0）。upstream 的 0009 打在同一个锚点。
++        com.azurebranches.config.AzureBranchesConfig.init(java.nio.file.Path.of("."));
++        // CeruLean end - AzureBranches 配置初始化
++
+     }
+ 
+     protected abstract boolean initServer() throws IOException;

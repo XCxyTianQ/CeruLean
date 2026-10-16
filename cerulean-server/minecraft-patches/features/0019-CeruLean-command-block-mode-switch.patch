@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Fri, 16 Oct 2026 17:42:26 +0800
+Subject: [PATCH] CeruLean command blocks: replace Folia hard disable with a config-driven mode switch
+
+---
+T4 Step 1（硬前置，0011 等价）。Folia 把命令方块整个关掉：
+  BaseCommandBlock.performCommand(ServerLevel) 第一行是 `if (true) return false; // Folia - region threading`
+不放开它，EXP walker 在第一次 performCommand 上就拿到 false 并 break，链退化为"什么都不做"。
+
+改成配置驱动（CommandBlockSupport.shouldRun()）：SAFE 保持 Folia 行为（默认），ACCESS/EXP 放开。
+同时给 catch(Throwable) 加 containFailure 分支：把跨区域命令失败**收容**成"本块失败"，
+而不是抛 ReportedException 崩掉整条区域线程（这正是 AzureBranches 0011 的做法）。
+
+回归面：本步同时让 MinecartCommandBlock.java 走同一入口生效 ⇒ 探针需覆盖命令方块矿车。
+---
+diff --git a/net/minecraft/world/level/BaseCommandBlock.java b/net/minecraft/world/level/BaseCommandBlock.java
+index 31f1583..eb702a3 100644
+--- a/net/minecraft/world/level/BaseCommandBlock.java
++++ b/net/minecraft/world/level/BaseCommandBlock.java
+@@ -91,7 +91,13 @@ public abstract class BaseCommandBlock {
+     }
+ 
+     public boolean performCommand(final ServerLevel level) {
+-        if (true) return false; // Folia - region threading
++        // CeruLean start - 命令方块执行模式开关（替代 Folia 的硬关）
++        // Folia 把命令方块整个关掉（原为 `if (true) return false;`），因为命令可能触碰别的区域
++        // 线程拥有的数据。这里改成配置驱动：SAFE=保持 Folia 行为（默认），ACCESS/EXP=放开，
++        // 跨区域部分由 CommandBlock/SetBlockCommand 的投递与 EXP 链 walker 负责。
++        // 配置未初始化时 CommandBlockSupport.mode() 会安全降级为 SAFE（见其实现）。
++        if (!com.azurebranches.command.CommandBlockSupport.shouldRun()) return false;
++        // CeruLean end - 命令方块执行模式开关
+         if (level.getGameTime() == this.lastExecution) {
+             return false;
+         }
