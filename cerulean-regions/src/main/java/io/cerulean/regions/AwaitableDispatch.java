@@ -67,6 +67,20 @@ public final class AwaitableDispatch {
     /** {@link #call} 等待拥有者的上限。超时即抛，避免"静默失败"。 */
     private static final long WAIT_SECONDS = 5L;
 
+    /**
+     * **调用方本身是 tick 线程**时用的等待上限。
+     *
+     * <p>实测根因（docs/17 §R1 附）：Folia 的 EDF 调度器是**按需**起线程的，实测出现过
+     * {@code /cerulean regions} 报"调度线程 1"的情形 —— 此时 global region 与目标 world region
+     * **跑在同一个 {@code Folia Region Scheduler Thread #0} 上**。从 global tick 线程投递后再同步等待，
+     * 等于等自己把队列排空 ⇒ **自锁**，一直卡到超时，并且会把 global region 卡到触发
+     * {@code [FoliaWatchdogThread] Global region has not responded in 5s}。
+     *
+     * <p>所以 tick 线程调用方的等待上限必须**远小于 watchdog 阈值**：宁可快速失败并给出可诊断的错误，
+     * 也不要把整个 global region 拖停。非 tick 线程（控制台/RPC 之类）仍用 {@link #WAIT_SECONDS}。</p>
+     */
+    private static final long TICK_THREAD_WAIT_MS = 1500L;
+
     // ── 自检计数（T3 验收用；只读快照见 stats()）────────────────────────
     private static final AtomicLong INLINE = new AtomicLong();
     private static final AtomicLong QUEUED = new AtomicLong();
@@ -74,6 +88,8 @@ public final class AwaitableDispatch {
     private static final AtomicLong CALL_BLOCKING_NANOS = new AtomicLong();
     /** 其中"调用方本身是区域 tick 线程却还要等别人"的次数——这才是真正的隐患。 */
     private static final AtomicLong CALL_BLOCKING_FROM_TICK_THREAD = new AtomicLong();
+    /** tick 线程调用方因"等不到目标区域"而快速失败的次数。 */
+    private static final AtomicLong FAST_FAILS = new AtomicLong();
     private static volatile String lastBlockingSite = "(none)";
     private static final java.util.concurrent.atomic.AtomicBoolean WARNED = new java.util.concurrent.atomic.AtomicBoolean();
 
@@ -161,10 +177,18 @@ public final class AwaitableDispatch {
             );
         }
         final long startNanos = System.nanoTime();
+        final long waitMillis = callerIsTickThread ? TICK_THREAD_WAIT_MS : WAIT_SECONDS * 1000L;
         try {
-            if (!done.await(WAIT_SECONDS, TimeUnit.SECONDS)) {
-                throw new IllegalStateException("AwaitableDispatch 等待区域线程超时（"
-                        + WAIT_SECONDS + "s）：位置 " + pos + "，区块 " + chunkX + "/" + chunkZ);
+            if (!done.await(waitMillis, TimeUnit.MILLISECONDS)) {
+                if (callerIsTickThread) {
+                    FAST_FAILS.incrementAndGet();
+                }
+                throw new IllegalStateException("AwaitableDispatch 等待区域线程超时（" + waitMillis + "ms，"
+                        + (callerIsTickThread ? "调用方是 tick 线程 ⇒ 目标区域可能与本线程共用同一个调度线程，"
+                            + "同步等待会自锁，故提前失败以免拖停整个区域" : "调用方非 tick 线程")
+                        + "）：位置 " + pos + "，区块 " + chunkX + "/" + chunkZ
+                        + "。需要同步返回值的读取请改用可异步的路径，或让服务端有 ≥2 个调度线程"
+                        + "（/cerulean regions 可看当前线程数）。");
             }
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
@@ -190,6 +214,7 @@ public final class AwaitableDispatch {
             + " callBlocking=" + calls
             + " callBlockingTotalMs=" + totalMs
             + " callBlockingFromTickThread=" + CALL_BLOCKING_FROM_TICK_THREAD.get()
+            + " fastFails=" + FAST_FAILS.get()
             + " lastBlockingSite=" + lastBlockingSite;
     }
 }

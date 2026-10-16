@@ -1,0 +1,71 @@
+# AzureBranches Global Configuration
+
+
+[worker_pools.io]
+threads = 4
+
+[worker_pools.io]
+hold_time_ms = 25
+
+[chunk_io]
+async_enabled = true
+
+[chunk_io.debounce]
+window_ms = 100
+
+[chunk_io.predictive_load]
+enabled = true
+
+[chunk_io.predictive_load]
+prediction_seconds = 2.0
+
+[chunk_io.predictive_load]
+preload_radius = 3
+
+[chunk_io.predictive_load]
+min_speed = 4.0
+
+[entity_limits]
+enabled = false
+
+[command_blocks]
+mode = "SAFE"
+
+[command_blocks.exp]
+remote_timeout_ms = 1000
+
+[command_blocks.exp]
+success_count_mode = "SUM"
+
+[command_blocks.exp]
+batch_max_size = "15"
+
+[command_blocks.exp.phase_snapshot]
+enabled = true
+
+[command_blocks.exp.validation]
+enabled = true
+
+[command_blocks.exp.validation]
+max_retries = 3
+
+[command_blocks.exp.validation]
+max_read_set = 256
+
+[command_blocks.exp4.data_intercept]
+enabled = true
+
+[command_blocks.exp4.entity_layer]
+enabled = true
+
+[command_blocks.exp4.deferred_actions]
+enabled = true
+
+[command_blocks.exp4.deferred_actions]
+max_per_phase = 256
+
+[storage]
+region_format = "mca"
+
+[storage.linear]
+compression_level = 1

@@ -65,6 +65,37 @@ def dispatch_blocking_calls():
     return int(m.group(1)) if m else None
 
 
+def scheduler_threads(tries=20, delay=1.0):
+    """探测 Folia 调度器当前线程数。
+
+    为什么先探测：`data get` 这类"命令契约要求同步返回值"的读取必须把世界访问投递到目标区域
+    并**同步等待**；当调度器只有 1 个线程时，global region 与目标 world region 跑在同一个
+    `Folia Region Scheduler Thread #0` 上 ⇒ 等待等于等自己 ⇒ **自锁**（实测会把 global region
+    卡到 `[FoliaWatchdogThread] Global region has not responded in 5s`）。
+    这不是功能坏，是环境前提不满足 —— 必须显式区分，不能记成通过、也不该记成失败。
+    """
+    for _ in range(tries):
+        m = re.search(r'调度线程 (\d+)', one('/cerulean regions'))
+        if m and int(m.group(1)) >= 2:
+            return int(m.group(1))
+        time.sleep(delay)
+    m = re.search(r'调度线程 (\d+)', one('/cerulean regions'))
+    return int(m.group(1)) if m else 0
+
+
+def require_two_scheduler_threads():
+    n = scheduler_threads()
+    if n < 2:
+        print(f"[SKIP] 环境前提不满足：Folia 调度器当前只有 {n} 个线程。")
+        print("        同步跨区域读取（data get / clone 的真拷断言）在此前提下会自锁，属已知限制")
+        print("        （docs/17 §环境前提）。本次结果记作**未验证**，既不算通过也不算失败。")
+        sys.exit(2)
+    print(f"  环境前提：调度线程 {n} 个（>=2，可安全同步等待）")
+    return n
+
+
+require_two_scheduler_threads()
+
 print("== T1 scoreboard：全子命令（每条独立连接）")
 check('objectives add', 'scoreboard objectives add ceruprobe dummy', not_unknown)
 check('objectives list', 'scoreboard objectives list', not_unknown)
