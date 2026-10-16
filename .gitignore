@@ -39,3 +39,6 @@ smoke-threads*/
 smoke-cmdprobe/
 smoke-triage/
 smoke-folia-report/
+
+# 图标栅格化器的编译产物（本机 cairo，不入库）
+/tools/icon/svg2png

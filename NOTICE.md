@@ -40,4 +40,11 @@ CeruLean Cores（下称"本项目"）是一个 Minecraft 服务端发行版。�
 
 ## 5. 图标
 
-`assets/icon.svg` 由本项目自行设计并生成（生成脚本 [tools/icon/gen_icon.py](tools/icon/gen_icon.py)，栅格化工具 [tools/icon/svg2png.c](tools/icon/svg2png.c)），与 AzureBranches 的图标为同一视觉家族但为独立设计。
+`assets/icon.svg` 由本项目自行设计并生成（生成脚本 [tools/icon/gen_icon.py](tools/icon/gen_icon.py)，
+栅格化器 [tools/icon/svg2png.c](tools/icon/svg2png.c) + [tools/icon/rasterize.sh](tools/icon/rasterize.sh)），
+与 AzureBranches 的图标为同一视觉家族但为独立设计。
+
+**构图（2026-10-16 改版）**：两个**直角顶点相对**的直角三角形，分居左上与右下，右下略大（1.18×），
+直角边与坐标轴平行。它抽象的是本项目最核心的那件事——**跨区域的工作交接**
+（`AwaitableDispatch` 投递、clone 两跳、EXP 链的挂起/恢复，都是把一块工作从一个区域交给另一个区域）；
+右下略大让构图有方向与轻重。几何参数与可调项见生成器头部注释。
