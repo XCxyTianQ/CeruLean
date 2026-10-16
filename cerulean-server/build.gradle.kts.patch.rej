@@ -1,0 +1,27 @@
+++++ REJECTED HUNK: 2
+@@ -86,7 +99,19 @@
+     }
+ }
+ 
+-val log4jPlugins = sourceSets.create("log4jPlugins")
++sourceSets {
++    main {
++        java {
++            srcDir("../paper-server/src/main/java")
++            srcDir("../cerulean-regions/src/main/java")   // CeruLean 收缩后的诊断模块
+            srcDir("../cerulean-exp/src/main/java")        // 从 AzureBranches 移植的 EXP 链本体（纯 JDK）
++        }
++        resources { srcDir("../paper-server/src/main/resources") }
++    }
++    test {
++        java { srcDir("../paper-server/src/test/java") }
++        resources { srcDir("../paper-server/src/test/resources") }
++    }
++}
++val log4jPlugins = sourceSets.create("log4jPlugins") {
++    java { srcDir("../paper-server/src/log4jPlugins/java") }
++}
+ configurations.named(log4jPlugins.compileClasspathConfigurationName) {
+     extendsFrom(configurations.compileClasspath.get())
+ }
+++++ END HUNK
