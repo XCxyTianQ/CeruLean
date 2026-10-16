@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Fri, 16 Oct 2026 19:09:27 +0800
+Subject: [PATCH] CeruLean setblock: register cross-region work with the EXP chain (deferred dispatch)
+
+---
+T4 Step 3（= T5 的差额）：把命令侧的跨区域 setblock 接进 EXP 链上下文。
+
+为什么必须做：只落 0012/0020 的链本体时，`ExpChainSupport.isContextActive()` 在全仓
+没有任何调用者 ⇒ walker 的 ctx.deferredByRegion 恒空、ctx.futures 只含命令自注册项
+⇒ 批边界（条件块 / batch_max_size / 链尾）永不触发、`dispatchAndSuspend` 永不执行，
+"可挂起链"形同未接。本补丁让 setblock 在 EXP 上下文里走
+`ExpChainSupport.registerDeferred(sameRegion, cx, cz, body)`。
+
+同时修掉 upstream 0013 的一处判据隐患：它用"来源坐标所在区域 == 目标区域"算 sameRegion，
+而 RCON/控制台命令跑在 **global region tick 线程**上、来源坐标固定在出生点（docs/15 §3）
+⇒ 跨区域写会被误判成同区域，进而在非拥有线程上内联写世界。这里改用
+`TickThread.isTickThreadFor(level, cx, cz)`，语义就是"这次会不会内联执行"，与上游 Folia
+在 queueOrExecuteTickTask 里的判据一致。
+
+重构：把命令体抽成 `placeBody`，EXP 路径与上游 Folia 路径共用同一份实现，两条路径的
+行为差异只体现在"派发方式"上（可等待 vs fire-and-forget）。
+
+未做（属 upstream 构建期注入的 554 行、依赖 CeruLean 没有的 RegionCommandExecutor）：
+OCC 读集校验、回滚重试、EXP6Plus 链 future 屏障。OCC 已按用户指示整块排除。
+---
+diff --git a/net/minecraft/server/commands/SetBlockCommand.java b/net/minecraft/server/commands/SetBlockCommand.java
+index b7ee694..c24f1bf 100644
+--- a/net/minecraft/server/commands/SetBlockCommand.java
++++ b/net/minecraft/server/commands/SetBlockCommand.java
+@@ -113,11 +113,12 @@ public class SetBlockCommand {
+         final boolean strict
+     ) throws CommandSyntaxException {
+         ServerLevel level = source.getLevel();
+-        // Folia start - region threading
+-        io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue.queueOrExecuteTickTask(
+-                level, pos.getX() >> 4, pos.getZ() >> 4, () -> {
+-                    try {
+-                        // Folia end - region threading
++        // CeruLean start - 把命令体抽成 Runnable，供两条派发路径复用（EXP 链 / 上游 Folia）
++        final int targetCx = pos.getX() >> 4;
++        final int targetCz = pos.getZ() >> 4;
++        final Runnable placeBody = () -> {
++            try {
++                // CeruLean end
+         if (level.isDebug()) {
+             throw ERROR_FAILED.create();
+         }
+@@ -144,13 +145,30 @@ public class SetBlockCommand {
+             level.updateNeighboursOnBlockSet(pos, oldState);
+         }
+ 
+-        source.sendSuccess(() -> Component.translatable("commands.setblock.success", pos.getX(), pos.getY(), pos.getZ()), true);
+-        return; // Folia - region threading
++                source.sendSuccess(() -> Component.translatable("commands.setblock.success", pos.getX(), pos.getY(), pos.getZ()), true);
++                return;
++            } catch (final CommandSyntaxException ex) {
++                sendMessage(source, ex);
++            }
++        };
++
++        // CeruLean start - EXP 链上下文：登记为**可等待的延迟工作**
++        // 这是"可挂起命令方块链"真正被接上的那一步：不接它，walker 的 ctx.deferredByRegion 恒空、
++        // 批边界（条件块 / batch_max_size / 链尾）永不触发，链永远不会挂起/恢复。
++        // sameRegion 判据故意**不用** upstream 的"来源坐标区域 == 目标区域"：RCON/控制台命令跑在
++        // global region tick 线程上、来源坐标固定在出生点（docs/15 §3），那个判据会把跨区域误判成同区域，
++        // 从而在非拥有线程上内联写世界。这里用 TickThread.isTickThreadFor，语义就是"这次会不会内联执行"。
++        if (com.azurebranches.command.ExpChainSupport.isContextActive()) {
++            com.azurebranches.command.ExpChainSupport.registerDeferred(
++                ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(level, targetCx, targetCz),
++                targetCx, targetCz, placeBody);
++            return 1;
++        }
++        // CeruLean end - EXP 链上下文
++
+         // Folia start - region threading
+-                } catch (CommandSyntaxException ex) {
+-                    sendMessage(source, ex);
+-                }
+-            });
++        io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue.queueOrExecuteTickTask(
++                level, targetCx, targetCz, placeBody);
+         return 1;
+         // Folia end - region threading
+     }

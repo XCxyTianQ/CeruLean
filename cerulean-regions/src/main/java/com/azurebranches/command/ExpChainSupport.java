@@ -234,6 +234,10 @@ public final class ExpChainSupport {
         }
         final CompletableFuture<Boolean> future = new CompletableFuture<>();
         futures.add(future);
+        // CeruLean: 可观测计数。命令侧（SetBlockCommand 的 EXP 分支）是否真的走到了这里，
+        // 是"链被接上"与"仍在走上游 fire-and-forget 路径"的唯一确定性区分 —— 尤其在本冒烟
+        // 环境只有 1 个区域、sameRegion 恒为 true、永远不会产生延迟批次的情况下。
+        if (sameRegion) { inlineRegistered.incrementAndGet(); } else { deferredRegistered.incrementAndGet(); }
 
         if (sameRegion) {
             // Same region: execute immediately on this (home) thread
@@ -375,6 +379,8 @@ public final class ExpChainSupport {
         }
     }
 
+    private static final AtomicLong inlineRegistered = new AtomicLong();
+    private static final AtomicLong deferredRegistered = new AtomicLong();
     private static final AtomicLong suspended = new AtomicLong();
     private static final AtomicLong resumed = new AtomicLong();
     private static final AtomicLong timeouts = new AtomicLong();
@@ -455,6 +461,12 @@ public final class ExpChainSupport {
 
     /** Record a PhaseSnapshot cache hit (used for metrics). */
     public static void onCacheHit() { phaseCacheHits.incrementAndGet(); }
+
+    /** 同区域内联登记次数（命令侧接线被走到的证据）。 */
+    public static long inlineRegisteredCount() { return inlineRegistered.get(); }
+
+    /** 跨区域延迟登记次数（会攒成批次、在批边界触发挂起）。 */
+    public static long deferredRegisteredCount() { return deferredRegistered.get(); }
 
     public static long suspendedCount() { return suspended.get(); }
     public static long resumedCount() { return resumed.get(); }

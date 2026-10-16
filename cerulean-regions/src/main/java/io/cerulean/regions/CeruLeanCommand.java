@@ -48,6 +48,8 @@ public final class CeruLeanCommand {
                         .executes(CeruLeanCommand::regionAt))))
             .then(Commands.literal("dispatch")
                 .executes(CeruLeanCommand::dispatchStats))
+            .then(Commands.literal("exp")
+                .executes(CeruLeanCommand::expStats))
             .build();
     }
 
@@ -58,6 +60,30 @@ public final class CeruLeanCommand {
      * {@code data get} 这类"命令契约要求同步返回值"的读取产生；写路径走
      * {@code dispatch()}，投递即返回，不该在这里涨。</p>
      */
+    /**
+     * {@code /cerulean exp}：EXP 链 walker 的自检快照。
+     *
+     * <p>挂起/恢复计数是"链真的被接上了"的唯一可观测证据：只有命令侧调用了
+     * {@code ExpChainSupport.registerDeferred}（SetBlockCommand 的 CeruLean 分支），
+     * walker 才会攒出待派发批次、在批边界挂起并恢复。</p>
+     */
+    private static int expStats(final CommandContext<CommandSourceStack> context) {
+        final StringBuilder out = new StringBuilder("CeruLean EXP 链自检");
+        out.append('\n').append("  上下文活跃 ").append(com.azurebranches.command.ExpChainSupport.isContextActive());
+        out.append(" / 模式 ").append(com.azurebranches.command.CommandBlockSupport.mode());
+        out.append('\n').append("  登记：内联 ").append(com.azurebranches.command.ExpChainSupport.inlineRegisteredCount())
+            .append(" / 跨区域 ").append(com.azurebranches.command.ExpChainSupport.deferredRegisteredCount());
+        out.append('\n').append("  挂起 ").append(com.azurebranches.command.ExpChainSupport.suspendedCount())
+            .append(" / 恢复 ").append(com.azurebranches.command.ExpChainSupport.resumedCount())
+            .append(" / 超时 ").append(com.azurebranches.command.ExpChainSupport.timeoutCount())
+            .append(" / 被取代 ").append(com.azurebranches.command.ExpChainSupport.supersededCount());
+        out.append('\n').append("  批上限 ").append(com.azurebranches.command.ExpChainSupport.maxBatchSize())
+            .append(" / 远程超时 ").append(com.azurebranches.command.ExpChainSupport.remoteTimeoutMs()).append("ms");
+        out.append('\n').append("  命令方块失败收容 ").append(com.azurebranches.command.CommandBlockSupport.containedFailureCount());
+        context.getSource().getSender().sendMessage(Component.text(out.toString()));
+        return 1;
+    }
+
     private static int dispatchStats(final CommandContext<CommandSourceStack> context) {
         context.getSource().getSender().sendMessage(Component.text("CeruLean 投递自检\n  " + AwaitableDispatch.stats()));
         return 1;

@@ -20,6 +20,7 @@
 用法（需服务端已起且 RCON 就绪，配置 mode 与参数一致）：
     python3 tools/smoke/exp_chain_probe.py SAFE|EXP [日志路径]
 """
+import re
 import sys
 import time
 
@@ -67,6 +68,22 @@ def poll(label, cmd, expect, tries=15, delay=1.0):
     return record(label + f'（轮询 {tries} 次未成立）', cmd, got, False)
 
 
+def ok_parse(got):
+    """命令是否**被解析并受理**。Brigadier 解析失败会带 <--[HERE] 指针；
+    只挡 'Unknown or incomplete command' 会漏掉 'Expected literal' 这类语法错（踩过）。"""
+    return 'Unknown or incomplete' not in got and '<--[HERE]' not in got
+
+
+def clear_rig():
+    """清掉整个试验台（含红石块）。
+
+    踩过：只清命令方块、留下上一轮的红石块 ⇒ `setblock` 放下的新方块**不会收到
+    neighborChanged**（setblock 只通知新方块的邻居，不通知它自己），于是头块拿不到
+    scheduled tick、链块拿不到 powered=true，两条都不执行，表现为"功能没生效"。
+    """
+    one(f'fill {HEAD} {CHAIN_REDSTONE} minecraft:air')
+
+
 def log_text():
     try:
         return open(LOG, encoding='utf-8', errors='replace').read()
@@ -89,15 +106,15 @@ log_before = log_text()
 
 # ── 建链：冲激头块（REDSTONE 模式）+ 链块，最后用红石块触发 ─────────
 check('清空目标区', f'fill 129 100 0 133 100 0 minecraft:air', lambda g: True)
-check('清空链位', 'fill 100 100 0 101 100 0 minecraft:air', lambda g: True)
+check('清空链位（含红石块）', 'fill 100 100 0 101 101 0 minecraft:air', lambda g: True)
 check('放置头块（impulse）',
       f'setblock {HEAD} minecraft:command_block[facing=east]'
       f'{{Command:"say head-ran"}} replace',
-      lambda g: 'Unknown or incomplete' not in g)
+      ok_parse)
 check('放置链块',
       f"setblock {CHAIN} minecraft:chain_command_block[facing=east]"
       f"{{Command:'setblock {TARGET} minecraft:command_block{{Command:chain-ran}}'}} replace",
-      lambda g: 'Unknown or incomplete' not in g)
+      ok_parse)
 # 通电顺序很关键：
 #   * 链块（SEQUENCE）的 isPowered() 读的是**方块实体字段** powered（默认 false，
 #     CommandBlockEntity.java:23/111），必须靠相邻红石信号把它置 true，
@@ -106,9 +123,9 @@ check('放置链块',
 #   所以**先给链块通电，再触发头块**。
 check('给链块通电（必须在触发头块之前）',
       f'setblock {CHAIN_REDSTONE} minecraft:redstone_block replace',
-      lambda g: 'Unknown or incomplete' not in g)
+      ok_parse)
 check('红石块触发头块', f'setblock {REDSTONE} minecraft:redstone_block replace',
-      lambda g: 'Unknown or incomplete' not in g)
+      ok_parse)
 
 if MODE == 'SAFE':
     # SAFE 下这条**本来就该不成立**，所以不能轮询（轮询 15 次后才报 FAIL 是设计缺陷，
@@ -145,10 +162,70 @@ elif MODE == 'EXP':
     record('EXP：配置被读到（控制台出现 command_blocks.mode=EXP）', LOG, notice, notice)
     record('EXP：本轮没有新增 ERROR', LOG, new_errors, new_errors == 0)
 
+# ── Step 3 验收：跨区域 setblock 必须被登记成"可等待的延迟工作" ──────
+# 只有命令侧接上 ExpChainSupport.registerDeferred（SetBlockCommand 的 CeruLean 分支），
+# walker 才会攒出待派发批次、在链尾批边界挂起（onSuspend）并在远程完成后恢复（onResume）。
+# 因此这里同时断言两件事：跨区域目标真的被写出来 + 挂起/恢复计数真的增长。
+if MODE == 'EXP':
+    def exp_counter(name):
+        m = re.search(name + r'\s+(\d+)', one('/cerulean exp'))
+        return int(m.group(1)) if m else None
+
+    susp0, resm0 = exp_counter('挂起'), exp_counter('恢复')
+    inl0 = exp_counter('内联')
+    print(f"  登记（内联）={inl0} 挂起/恢复={susp0}/{resm0}")
+
+    # 本冒烟环境能不能构造"跨区域"？force-load 的两个区块簇会被并入同一个区域
+    # （实测 overworld 只有 1 个区域）⇒ sameRegion 恒 true ⇒ 永远不产生延迟批次。
+    # 因此这里先量拓扑，再决定"挂起/恢复"是断言还是显式跳过（SKIP 不能算通过）。
+    regions_txt = one('/cerulean regions')
+    m = re.search(r'minecraft:overworld: 区域 (\d+)', regions_txt)
+    overworld_regions = int(m.group(1)) if m else None
+    print(f"  overworld 区域数 = {overworld_regions}")
+
+    XREGION_TARGET = '1000 100 0'
+    check('跨区域链 · forceload 远端区域', 'forceload add 992 0 1008 16', lambda g: True)
+    one(f'setblock {XREGION_TARGET} minecraft:air')
+    # 必须连红石块一起清：上一段留下的红石块会让新方块收不到 neighborChanged（见 clear_rig 注释）
+    clear_rig()
+    check('跨区域链 · 清空试验台', 'fill 100 100 0 101 101 0 minecraft:air', lambda g: True)
+    check('跨区域链 · 头块',
+          f'setblock {HEAD} minecraft:command_block[facing=east]{{Command:"say head-ran"}} replace',
+          ok_parse)
+    check('跨区域链 · 链块（命令写到 ~1000 格外的区域）',
+          f"setblock {CHAIN} minecraft:chain_command_block[facing=east]"
+          f"{{Command:'setblock {XREGION_TARGET} minecraft:command_block{{Command:xregion-ran}}'}} replace",
+          ok_parse)
+    check('跨区域链 · 给链块通电', f'setblock {CHAIN_REDSTONE} minecraft:redstone_block replace',
+          ok_parse)
+    check('跨区域链 · 触发头块', f'setblock {REDSTONE} minecraft:redstone_block replace',
+          ok_parse)
+    poll('跨区域链 · 远端真的被写出来了',
+         f'data get block {XREGION_TARGET} Command',
+         lambda g: 'xregion-ran' in g, tries=20)
+    susp1, resm1 = exp_counter('挂起'), exp_counter('恢复')
+    inl1, dfr1 = exp_counter('内联'), exp_counter('跨区域')
+    print(f"  登记（内联/跨区域）= {inl1}/{dfr1} 挂起/恢复 = {susp1}/{resm1}")
+
+    # 确定性判据：命令侧（SetBlockCommand 的 EXP 分支）真的调用了 registerDeferred。
+    # 只落链本体（0020）而不接 0021 时，这个计数**永远不会增长**（走的是上游 fire-and-forget）。
+    record('跨区域链 · 命令侧确实接进了 EXP 上下文（registerDeferred 被调用）',
+           '/cerulean exp', f'inline={inl1} deferred={dfr1}',
+           inl1 is not None and inl0 is not None and (inl1 > inl0 or (dfr1 or 0) > 0))
+
+    if overworld_regions is not None and overworld_regions >= 2:
+        record('跨区域链 · 链真的挂起过（walker 批边界触发）', '/cerulean exp', susp1,
+               susp0 is not None and susp1 is not None and susp1 > susp0)
+        record('跨区域链 · 链真的恢复过（远程完成后回 home 区继续）', '/cerulean exp', resm1,
+               resm0 is not None and resm1 is not None and resm1 > resm0)
+    else:
+        print(f"  [SKIP] 链挂起/恢复：本环境 overworld 只有 {overworld_regions} 个区域"
+              f"（force-load 的两个区块簇被并入同一区域）⇒ sameRegion 恒 true，"
+              f"不会产生跨区域延迟批次，该路径**无法构造**。已记入 docs/16，待有玩家/多区域环境时补测。")
+    one(f'setblock {XREGION_TARGET} minecraft:air')
+
 # ── 收尾：拆掉命令方块与红石块，避免持续 tick 污染后续用例 ──────────
-one('fill 100 100 0 101 100 0 minecraft:air')
-one(f'setblock {REDSTONE} minecraft:air')
-one(f'setblock {CHAIN_REDSTONE} minecraft:air')
+clear_rig()
 one(f'setblock {TARGET} minecraft:air')
 
 print()
