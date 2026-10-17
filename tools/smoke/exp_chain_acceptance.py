@@ -70,10 +70,14 @@ def run_mode(mode, first):
                             capture_output=True, text=True)
     print("  稳定期：L0 探针 " + ("通过" if settle.returncode == 0 else f"未通过({settle.returncode})"))
     time.sleep(3)
-    probe = subprocess.run([sys.executable, 'tools/smoke/exp_chain_probe.py', mode,
-                            os.path.join(RUN, 'server-console.log')], env=ENV)
+    log = os.path.join(RUN, 'server-console.log')
+    probe = subprocess.run([sys.executable, 'tools/smoke/exp_chain_probe.py', mode, log], env=ENV)
+    occ = None
+    if mode == 'EXP':
+        # EXP6Plus 的 OCC 冲突用例（C1/C2/C3）只在 EXP 下有意义
+        occ = subprocess.run([sys.executable, 'tools/smoke/exp6plus_occ_probe.py', log], env=ENV)
     sh('tools/smoke/server-down.sh', RUN)
-    return probe.returncode
+    return probe.returncode or (occ.returncode if occ else 0)
 
 
 rc_safe = run_mode('SAFE', first=True)

@@ -90,6 +90,33 @@ enabled = false → EXP3 validation disabled (config: validation.enabled=false)
 注意 `maxReadSet=128 / maxRetries=5` 是**测试配置里特意写的非默认值**（默认 256/3）——
 这证明配置文件真的被读取，而不只是"默认值恰好一致"。
 
+## 5.2 EXP6Plus 的 OCC 冲突用例（C1/C2/C3）
+
+以 `AzureBranches/exp6plus-smoke.py` 为参照改写为 `tools/smoke/exp6plus_occ_probe.py`，
+并从 `exp_chain_acceptance.py` 的 EXP 阶段触发。**断言比上游更硬**：不只数日志标记，
+还直接读 `/cerulean exp` 的 OCC 计数器。
+
+| 用例 | 结果 | 证据 |
+|---|---|---|
+| **C2** 实体在挂起期间死亡 → RETRY | ✅ | `retry 3→4 (Δ1)`，`PHASE-START=1`（重放的是 Phase 不是头块） |
+| **C3** 幽灵分数防护 | ✅ | `NO-ENTRY=1`、`GHOST-5=0`、`GHOST-7=0` |
+| **C1** 实体存活 → COMMIT | ⚠️ **已知缺口** | 出现 `retry Δ3`（耗尽）⇒ `P1-SET-OK`/`P1-COMMIT-KEEP-5` 缺失 |
+
+**C1 的根因（已定位，未修）**：链里 `setblock 10 64 10` 会先 `getBlockState` 把
+`(10,64,10)=air` 记进读集，然后自己把它写成 stone；链尾校验时
+`verifyReadSetAndResume` 把这处"自己写的"当成**外部修改** ⇒ 误判冲突 ⇒ 重试 3 次耗尽。
+修法：外部检查阶段必须把本 Phase 自己写过的位置 / 分数键（`pendingWritePositions` /
+`pendingScoreKeys`）从"外部修改"里**排除**。计分域同理（本 Phase 写过的键不应再比旧值）。
+
+### 调试过程中的两个"假线索"（记下来，避免重复排查）
+
+1. **链内 `@e` 选择器其实可用**。一次 A/B 里 `scoreboard players set @e[...]` 失败、而
+   `set @<UUID>` 成功，看起来像"选择器在链里解析不到实体"（差点去补已排除的
+   `EntitySelector` 补丁）。真相是**僵尸在白天烧死了**。改成
+   `Invulnerable:1b` + `time set midnight` 后，链内选择器写分数**完全正常**
+   （实测值 33、`计分写 1`）。所以 `EntitySelector` 跨区域补丁与本主题无关。
+2. **`execute if entity @e[...]` 未触发 ≠ 选择器坏**：同上，实体已死。
+
 ## 6. 还没做（如实留档）
 
 1. **`/data` 的 NBT 数据域（EXP6 的核心之一）**：需要在 `/data` 的六条流（get/getNumeric/
