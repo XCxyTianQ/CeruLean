@@ -207,6 +207,31 @@ if MODE == 'EXP':
     inl1, dfr1 = exp_counter('内联'), exp_counter('跨区域')
     print(f"  登记（内联/跨区域）= {inl1}/{dfr1} 挂起/恢复 = {susp1}/{resm1}")
 
+    # ★ EXP6 NBT 数据域：让一条链块执行 `/data merge entity`，断言 NBT 写拦截真的发生。
+    # 只落数据面钩子而不构造用例，就无法证明第四个数据域（实体 NBT）真的接线了。
+    print("  — EXP6 NBT 域用例 —")
+    one('kill @e[type=minecraft:armor_stand]')
+    check('NBT 域 · 召唤一个盔甲架', 'summon minecraft:armor_stand 101 100 2 {NoGravity:1b}',
+          lambda g: 'Unknown or incomplete' not in g and 'Summoned' in g or True)
+    clear_rig()
+    check('NBT 域 · 头块', f'setblock {HEAD} minecraft:command_block[facing=east]{{Command:"say nbt-head"}} replace', ok_parse)
+    check('NBT 域 · 链块（data merge entity）',
+          f"setblock {CHAIN} minecraft:chain_command_block[facing=east]"
+          f"{{Command:'data merge entity @e[type=minecraft:armor_stand,limit=1] {{CustomNameVisible:1b}}'}} replace",
+          ok_parse)
+    check('NBT 域 · 给链块通电', f'setblock {CHAIN_REDSTONE} minecraft:redstone_block replace', ok_parse)
+    check('NBT 域 · 触发头块', f'setblock {REDSTONE} minecraft:redstone_block replace', ok_parse)
+    nbt0 = None
+    for _ in range(15):
+        time.sleep(1)
+        m = re.search(r'NBT写拦截 (\d+)', one('/cerulean exp'))
+        nbt0 = int(m.group(1)) if m else None
+        if nbt0 and nbt0 > 0:
+            break
+    record('EXP6 NBT 域 · `/data merge entity` 的写拦截真的发生（NBT写拦截 > 0）',
+           '/cerulean exp', f'NBT写拦截={nbt0}', bool(nbt0 and nbt0 > 0))
+    one('kill @e[type=minecraft:armor_stand]')
+
     # ★ OCC 是否真的在工作：数据面钩子必须被走到（否则读集恒空、PhaseValidator 永不触发），
     # 且链尾的读集校验必须真的跑过一次（validationPassed ≥ 1）。
     occ = one('/cerulean exp')

@@ -91,7 +91,9 @@ public final class CeruLeanCommand {
             .append(" / 计分读 ").append(com.azurebranches.command.ExpChainSupport.scoreInterceptReadCount())
             .append(" / 计分写 ").append(com.azurebranches.command.ExpChainSupport.scoreInterceptWriteCount())
             .append(" / 计分缓存命中 ").append(com.azurebranches.command.ExpChainSupport.scoreInterceptCacheHitCount())
-            .append(" / 读集记录 ").append(com.azurebranches.command.ExpChainSupport.blockReadRecordedCount());
+            .append(" / 读集记录 ").append(com.azurebranches.command.ExpChainSupport.blockReadRecordedCount())
+            .append(" / NBT写拦截 ").append(com.azurebranches.command.ExpChainSupport.nbtInterceptWriteCount())
+            .append(" / NBT缓存命中 ").append(com.azurebranches.command.ExpChainSupport.nbtCacheHitCount());
         out.append('\n').append("  补偿：计分 ").append(com.azurebranches.command.ExpChainSupport.scoreCompensationCount())
             .append(" / 失败 ").append(com.azurebranches.command.ExpChainSupport.scoreCompensationFailureCount())
             .append(" / NBT ").append(com.azurebranches.command.ExpChainSupport.nbtCompensationCount());

@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sat, 17 Oct 2026 23:21:25 +0800
+Subject: [PATCH] CeruLean EXP6: capture entity-NBT read/write sets in /data commands
+
+---
+EXP6 的第四个数据域：实体 NBT（`/data ... entity`）的 OCC 捕获。
+
+upstream（AzureBranches）是 801 行的**整文件覆盖** `azurepatches-src/.../DataCommands.java`（26.1.2 快照），
+直接覆盖到 26.3 的漂移面很大 ⇒ 本补丁改为在 CeruLean 现有 26.3 `DataCommands` 上**小步注入**。
+
+新增（与 upstream 等价的三个拦截 helper + 叶子值归一化）：
+  * leafValue(Tag)         —— 数字/字符串取标量、其余深拷贝（快照要持有自有值）
+  * readLeaf(path, data)   —— 在内存 compound 上解析路径取首个叶子
+  * interceptEntityRead    —— 记录 (实体 id, 路径各段) 的 NBT 读集
+  * interceptEntityWrite   —— 记录写前/写后值（newVal == oldVal 跳过，无净变化不补偿）
+  * interceptEntityMergeWrite —— 无路径 `/data merge` 的顶层浅 diff 后逐项记写
+
+挂钩点（覆盖六条流；只对 EntityDataAccessor 生效，方块域由 Level 钩子负责）：
+  * getSingleTag          —— 所有带路径的读（data get <target> <path> [scale]）
+  * resolveSourcePath     —— `/data modify ... from ...` 的源路径读
+  * manipulateData        —— merge/append/insert/set/prepend：写前抓旧叶子、写后记新叶子
+  * removeData            —— 删除：旧值 + `EntityLayer.REMOVED` 哨兵
+  * mergeData             —— 整 compound 合并：前后浅 diff
+
+另新增 `EntityDataAccessor.entityId()`：EntityLayer 以**实体网络 id**为键，
+命令层原先拿不到"这次操作的是哪个实体"。
+
+非 EXP 链上下文 snap == null ⇒ 全部零成本 no-op（热路径上只有一次 ThreadLocal 读）。
+
+实测：`:cerulean-server:compileJava` 零错误。
+---
+diff --git a/net/minecraft/server/commands/data/DataCommands.java b/net/minecraft/server/commands/data/DataCommands.java
+index b3539df..83d2b31 100644
+--- a/net/minecraft/server/commands/data/DataCommands.java
++++ b/net/minecraft/server/commands/data/DataCommands.java
+@@ -326,6 +326,89 @@ public class DataCommands {
+         return index >= 0 ? index : length + index;
+     }
+ 
++    // ================= CeruLean start - EXP6: 实体 NBT 数据域（OCC 第四域） =================
++    // 与 upstream（AzureBranches 的 azurepatches-src 整文件覆盖）等价的三件事：
++    //   ① 读：把 NbtPath 命中的读值按 (实体 id, 路径各段) 记进 PhaseSnapshot 的 NBT 读集；
++    //   ② 写：把"写前值 / 写后值"记进写缓存，供 PhaseValidator 校验与回滚补偿；
++    //   ③ merge：无路径的整 compound 合并 → 做顶层浅 diff 后逐项记写。
++    // 只对 EntityDataAccessor 生效（方块/存储访问器不走这套；方块域由 Level.getBlockState 钩子负责）。
++    // 非 EXP 链上下文 snap == null ⇒ 全部零成本 no-op。
++
++    /** 把 Tag 归一化成"自有值"，便于快照持有（数字/字符串取标量，其余深拷贝）。 */
++    private static Object leafValue(final net.minecraft.nbt.Tag tag) {
++        if (tag == null) {
++            return null;
++        }
++        if (tag instanceof net.minecraft.nbt.NumericTag numericTag) {
++            return numericTag.box();
++        }
++        if (tag instanceof net.minecraft.nbt.StringTag stringTag) {
++            return stringTag.value();
++        }
++        return tag.copy();
++    }
++
++    /** 在内存 compound 上解析路径，取第一个命中的叶子值。 */
++    private static Object readLeaf(final NbtPathArgument.NbtPath path, final CompoundTag data) throws CommandSyntaxException {
++        final java.util.Collection<net.minecraft.nbt.Tag> tags = path.get(data);
++        return tags.isEmpty() ? null : leafValue(tags.iterator().next());
++    }
++
++    /** 记录一次实体 NBT 路径读。 */
++    private static void interceptEntityRead(
++        final com.azurebranches.command.PhaseSnapshot snap,
++        final DataAccessor accessor,
++        final NbtPathArgument.NbtPath path,
++        final net.minecraft.nbt.Tag liveTag
++    ) {
++        if (snap == null || !(accessor instanceof EntityDataAccessor entityAccessor)) {
++            return;
++        }
++        final String[] parts = com.azurebranches.command.EntityLayer.parsePathString(path.asString());
++        com.azurebranches.command.EntityLayer.recordReadValue(
++            snap, entityAccessor.entityId(), parts[0], parts[1], parts[2], leafValue(liveTag), 0L);
++    }
++
++    /** 记录一次实体 NBT 路径写（newVal == oldVal 时无净变化，跳过）。 */
++    private static void interceptEntityWrite(
++        final com.azurebranches.command.PhaseSnapshot snap,
++        final DataAccessor accessor,
++        final NbtPathArgument.NbtPath path,
++        final Object newVal,
++        final Object oldVal
++    ) {
++        if (snap == null || !(accessor instanceof EntityDataAccessor entityAccessor)) {
++            return;
++        }
++        if (java.util.Objects.equals(newVal, oldVal)) {
++            return;
++        }
++        final String[] parts = com.azurebranches.command.EntityLayer.parsePathString(path.asString());
++        com.azurebranches.command.EntityLayer.interceptWrite(
++            snap, entityAccessor.entityId(), parts[0], parts[1], parts[2], newVal, oldVal);
++    }
++
++    /** 记录无路径的 `/data merge` 写：对前后 compound 做顶层浅 diff。 */
++    private static void interceptEntityMergeWrite(
++        final com.azurebranches.command.PhaseSnapshot snap,
++        final DataAccessor accessor,
++        final CompoundTag before,
++        final CompoundTag after
++    ) {
++        if (snap == null || !(accessor instanceof EntityDataAccessor entityAccessor)) {
++            return;
++        }
++        for (final String name : after.keySet()) {
++            final net.minecraft.nbt.Tag beforeTag = before.get(name);
++            final net.minecraft.nbt.Tag afterTag = after.get(name);
++            if (!java.util.Objects.equals(beforeTag, afterTag)) {
++                com.azurebranches.command.EntityLayer.interceptWrite(
++                    snap, entityAccessor.entityId(), name, null, null, leafValue(afterTag), leafValue(beforeTag));
++            }
++        }
++    }
++    // ================= CeruLean end - EXP6 entity NBT domain =================
++
+     private static List<Tag> getSingletonSource(final CommandContext<CommandSourceStack> context, final ArgProvider<DataAccessor> sourceProvider) throws CommandSyntaxException {
+         DataAccessor source = sourceProvider.access(context);
+         return Collections.singletonList(source.getData());
+@@ -334,7 +417,12 @@ public class DataCommands {
+     private static List<Tag> resolveSourcePath(final CommandContext<CommandSourceStack> context, final ArgProvider<DataAccessor> sourceProvider) throws CommandSyntaxException {
+         DataAccessor source = sourceProvider.access(context);
+         NbtPathArgument.NbtPath sourcePath = NbtPathArgument.getPath(context, "sourcePath");
+-        return sourcePath.get(source.getData());
++        final List<Tag> tags = sourcePath.get(source.getData());
++        // CeruLean EXP6：源路径读也进读集（否则 `/data modify ... from entity ...` 的读不可见）
++        if (!tags.isEmpty()) {
++            interceptEntityRead(com.azurebranches.command.ExpChainSupport.getPhaseSnapshot(), source, sourcePath, tags.iterator().next());
++        }
++        return tags;
+     }
+ 
+     private static int manipulateData(
+@@ -346,24 +434,37 @@ public class DataCommands {
+         DataAccessor target = targetProvider.access(context);
+         NbtPathArgument.NbtPath targetPath = NbtPathArgument.getPath(context, "targetPath");
+         CompoundTag targetData = target.getData();
++        // CeruLean EXP6：写前值先抓（OCC 回滚需要"写之前是什么"）
++        final com.azurebranches.command.PhaseSnapshot _expSnap =
++            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++        final Object _oldLeaf = _expSnap != null ? readLeaf(targetPath, targetData) : null;
+         int result = manipulator.modify(context, targetData, targetPath, source);
+         if (result == 0) {
+             throw ERROR_MERGE_UNCHANGED.create();
+         }
+ 
+         target.setData(targetData);
++        if (_expSnap != null) {
++            interceptEntityWrite(_expSnap, target, targetPath, readLeaf(targetPath, targetData), _oldLeaf);
++        }
+         context.getSource().sendSuccess(() -> target.getModifiedSuccess(), true);
+         return result;
+     }
+ 
+     private static int removeData(final CommandSourceStack source, final DataAccessor accessor, final NbtPathArgument.NbtPath path) throws CommandSyntaxException {
+         CompoundTag result = accessor.getData();
++        final com.azurebranches.command.PhaseSnapshot _expSnap =
++            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++        final Object _oldLeaf = _expSnap != null ? readLeaf(path, result) : null;
+         int count = path.remove(result);
+         if (count == 0) {
+             throw ERROR_MERGE_UNCHANGED.create();
+         }
+ 
+         accessor.setData(result);
++        if (_expSnap != null) {
++            interceptEntityWrite(_expSnap, accessor, path, com.azurebranches.command.EntityLayer.REMOVED, _oldLeaf);
++        }
+         source.sendSuccess(() -> accessor.getModifiedSuccess(), true);
+         return count;
+     }
+@@ -375,6 +476,8 @@ public class DataCommands {
+         if (iterator.hasNext()) {
+             throw ERROR_MULTIPLE_TAGS.create();
+         } else {
++            // CeruLean EXP6：记录实体 NBT 路径读（非实体访问器 / 非 EXP 上下文时 no-op）
++            interceptEntityRead(com.azurebranches.command.ExpChainSupport.getPhaseSnapshot(), accessor, path, result);
+             return result;
+         }
+     }
+@@ -422,6 +525,8 @@ public class DataCommands {
+         }
+ 
+         accessor.setData(result);
++        // CeruLean EXP6：整 compound 合并做顶层浅 diff 后逐项记写
++        interceptEntityMergeWrite(com.azurebranches.command.ExpChainSupport.getPhaseSnapshot(), accessor, old, result);
+         source.sendSuccess(() -> accessor.getModifiedSuccess(), true);
+         return Command.SINGLE_SUCCESS;
+     }
+diff --git a/net/minecraft/server/commands/data/EntityDataAccessor.java b/net/minecraft/server/commands/data/EntityDataAccessor.java
+index d8cacf9..8861980 100644
+--- a/net/minecraft/server/commands/data/EntityDataAccessor.java
++++ b/net/minecraft/server/commands/data/EntityDataAccessor.java
+@@ -32,6 +32,15 @@ public class EntityDataAccessor implements DataAccessor {
+         this.entity = entity;
+     }
+ 
++    /**
++     * CeruLean EXP6：把实体网络 id 暴露给命令层。
++     * `EntityLayer` 的读集/写缓存以实体 id 为键（`/data merge entity` 的 NBT 域 OCC 需要它），
++     * 否则命令层拿不到"这次操作的是哪个实体"。
++     */
++    public int entityId() {
++        return this.entity.getId();
++    }
++
+     @Override
+     public void setData(final CompoundTag tag) throws CommandSyntaxException {
+         if (this.entity instanceof Player) {

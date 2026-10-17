@@ -10,7 +10,7 @@
 | CommandBlock 的 OCC / EXP6Plus **逻辑**（读集校验、回滚重试、补偿、chain-future 屏障） | ✅ 已落（`0024`，583 行注入 + `RegionCommandExecutor`） |
 | **数据面**（让读集真的有内容）：方块读集 / 计分读写 / 实体读集 | ✅ 已落（`0025`/`0026`） |
 | OCC **真的在跑**的可观测证据 | ✅ `读集记录 = 64`、`validationPassed ≥ 1`、`挂起/恢复 = 2/2` |
-| `/data` 的 NBT 数据域（EXP6 的 NbtPath 级捕获） | ⬜ **未做**（见 §6） |
+| `/data` 的 NBT 数据域（EXP6 的 NbtPath 级捕获） | ✅ 已落（`0027`），**NBT写拦截=1** 实测 |
 | `/data` `/tag` `/trigger` 等命令的覆盖层 | ⬜ 未做（与 OCC 闭环无因果关系，见 §6） |
 | 以 `exp6/exp6plus-smoke.py` 为参照的完整用例 | ⬜ 未做（§6） |
 
@@ -99,4 +99,5 @@ OCC 校验 · 链尾读集校验真的跑过（validationPassed ≥ 1）      �
 | `…/features/0026-CeruLean-exp-occ-read-count.patch` | `onBlockReadRecorded()` 读数计数（EXP3 接线的直接判据） |
 | `cerulean-regions/…/ExpChainSupport.java` | 新增 `onBlockReadRecorded` / `blockReadRecordedCount` |
 | `cerulean-regions/…/CeruLeanCommand.java` | `/cerulean exp` 增输出：OCC 校验（通过/重试/耗尽/冲突率）、数据面（方块读/计分读/计分写/缓存命中/读集记录）、补偿（计分/NBT） |
-| `tools/smoke/exp_chain_probe.py` | 新增两条 OCC 运行时断言 |
+| `…/features/0027-CeruLean-exp-occ-nbt-domain.patch` | EXP6：`/data` 实体 NBT 读/写集的 NbtPath 级捕获 |
+| `tools/smoke/exp_chain_probe.py` | 新增 OCC 运行时断言 + EXP6 NBT 域用例（`/data merge entity`） |
