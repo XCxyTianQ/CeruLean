@@ -1,0 +1,977 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sat, 17 Oct 2026 22:45:33 +0800
+Subject: [PATCH] CeruLean EXP OCC + EXP6Plus: read-set validation, rollback/retry, chain-future barrier
+
+---
+移植 OCC（EXP3 读集校验 / 回滚重试）与 EXP6Plus 语义到 Folia 26.3 基座。
+
+来源：AzureBranches 的 `folia-server/build.gradle.kts` 构建期注入（transformSource 的两个
+cmdBlockFile 块，共 15 个替换对 / 583 行），以及 `azurepatches-new` 里的
+`net/minecraft/server/commands/RegionCommandExecutor.java`（240 行）。
+
+移植方式**不是手抄**：写了一个解析器把 build.gradle.kts 里 `transformSource(...)` 的
+(anchor, replacement) 对求值出来，再在 CeruLean 已物化的 26.3 `CommandBlock.java` 上**重放**
+同一组替换（与 upstream 一样逐锚点断言"必须恰好命中一次"，15/15 全部命中）。
+这样得到的文件与 upstream 注入结果等价，且可复核。
+
+内容（逐块）：
+  * EXP3 OCC：`startTraversal(level.getSeed())` 确定性种子、条件块处的 savepoint、
+    读集（readSetPositions）捕获并挂到 Continuation、Phase 恢复前
+    `verifyReadSetAndResume(...)` → `PhaseValidator.validate(...)`；
+    冲突时 `rollbackAndRetryExpChain` / `retryExpChainPhase` 回滚并重放整个 Phase，
+    校验结果计数走 `ExpChainSupport.onValidationPassed/Retry/Exhausted`；
+  * EXP4：oldStateCapture 回滚基线、`commitDeferredActions`；
+  * EXP5Plus：计分板拦截（写前记旧值、缓存补偿）；
+  * EXP6Plus：跨 Phase 的实体读集 carry 与计分 carry、失败时的
+    `EntityLayer.compensateFor` / `ScoreLayer.compensate` 反向补偿、
+    **chain-future 屏障**（让 dispatchAndSuspend 真正等待远程批次）。
+
+新增 `RegionCommandExecutor`：跨区域命令执行的统一门面，提供
+`onGlobalAsync` / `onEntityAsync` / `onBlock(Region)Async` / `onGlobal` / `onBlock` /
+`onEntity` / `unwrap` / `isTickThread` / `runOnSource`（本補丁用到前两者）。
+
+库侧零改动：`cerulean-regions` 的 8 个 com/azurebranches 类与 upstream `azurebranches-common`
+逐字节相同，注入代码引用的 PhaseValidator / PhaseSnapshot / EntityLayer / ScoreLayer /
+DeferredAction / ExpChainSupport 的公开 API 已全部具备（含 `ValidationResult` / `ActionType` 两个嵌套类型）。
+
+**未包含**（按用户范围）：EXP7/EXP7Plus 存储引擎（IRegionFile/bLinear v4）、
+ThrownEnderpearl 的 Folia #421 修复、EntitySelector 跨区域 @e、
+以及 /data /tag /trigger /team 等命令的整文件覆盖（那些是 RegionCommandExecutor 的另一批使用者）。
+---
+diff --git a/net/minecraft/server/commands/RegionCommandExecutor.java b/net/minecraft/server/commands/RegionCommandExecutor.java
+new file mode 100644
+index 0000000..4b9f5e7
+--- /dev/null
++++ b/net/minecraft/server/commands/RegionCommandExecutor.java
+@@ -0,0 +1,240 @@
++package net.minecraft.server.commands;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import com.mojang.brigadier.exceptions.CommandSyntaxException;
++import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.Executor;
++import java.util.concurrent.Executors;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
++import java.util.concurrent.atomic.AtomicBoolean;
++import net.minecraft.commands.CommandSourceStack;
++import net.minecraft.core.BlockPos;
++import net.minecraft.network.chat.Component;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.util.Mth;
++import net.minecraft.world.entity.Entity;
++
++/**
++ * AzureBranches - cross-region command execution bridge.
++ *
++ * Folia runs each command on the region thread of its source. Commands that
++ * touch data owned by another region (e.g. /data, /tag, /trigger on a distant
++ * entity or block) must hop to the owning region before touching that data.
++ *
++ * EXP4Plus split this bridge into two families:
++ *
++ *  - <b>Async (preferred)</b>: {@code onBlockAsync}/{@code onEntityAsync} return
++ *    a {@link CompletableFuture} and never block. A tick (region) thread should
++ *    always use these and resume the command via a callback, because blocking a
++ *    tick thread stalls every entity/block/command owned by that region.
++ *
++ *  - <b>Blocking (legacy)</b>: {@code onBlock}/{@code onEntity} block the caller
++ *    up to 2s. These are only safe on a non-tick thread (worker/async/console).
++ *    They refuse to block a tick thread (fail fast) so the anti-pattern can never
++ *    silently stall a region again.
++ *
++ * The caller must pass only immutable/thread-safe values into the task;
++ * Minecraft-internal objects of the target region must be captured inside
++ * the lambda (e.g. via the scheduled entity handed to the callback).
++ */
++public final class RegionCommandExecutor {
++
++    @FunctionalInterface
++    public interface BlockTask<T> {
++        T run() throws CommandSyntaxException;
++    }
++
++    @FunctionalInterface
++    public interface EntityTask<T> {
++        T run(Entity entity) throws CommandSyntaxException;
++    }
++
++    private static final SimpleCommandExceptionType ERROR_TIMEOUT = new SimpleCommandExceptionType(
++        Component.literal("AzureBranches: cross-region command timed out")
++    );
++    private static final long TIMEOUT_MILLIS = 2000L;
++    private static final AtomicBoolean TICK_BLOCK_WARNED = new AtomicBoolean(false);
++
++    /** Bounded daemon pool for offloading synchronous data-access work off tick threads. */
++    private static final Executor WORKER_POOL = Executors.newFixedThreadPool(2, r -> {
++        final Thread t = new Thread(r, "AzureBranches-Data-Worker");
++        t.setDaemon(true);
++        return t;
++    });
++
++    private RegionCommandExecutor() {}
++
++    /** Worker pool for non-tick-thread blocking data access (used by DataAccessor defaults). */
++    public static Executor workerPool() {
++        return WORKER_POOL;
++    }
++
++    // ----------------------------------------------------------------
++    //  Async primitives (the optimal, non-blocking path)
++    // ----------------------------------------------------------------
++
++    /** Execute on the region owning the given block position, without blocking. */
++    public static <T> CompletableFuture<T> onBlockAsync(final ServerLevel level, final BlockPos pos, final BlockTask<T> task) {
++        return onBlockRegionAsync(level, pos.getX() >> 4, pos.getZ() >> 4, task);
++    }
++
++    /** Execute on the region owning the given chunk coordinates, without blocking. */
++    public static <T> CompletableFuture<T> onBlockRegionAsync(final ServerLevel level, final int cx, final int cz, final BlockTask<T> task) {
++        final CompletableFuture<T> future = new CompletableFuture<>();
++        io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
++            .queueOrExecuteTickTask(level, cx, cz, () -> complete(future, task));
++        return future;
++    }
++
++    /** Execute on the region owning the given entity, without blocking.
++     *
++     * <p>AzureBranches EXP6: when the calling thread IS the entity's owning
++     * tick thread, the task runs inline. Folia's entity scheduler queues to
++     * the entity's next tick even on its own thread (scheduleOrExecute only
++     * inlines during the entity's own tick stage), which silently broke the
++     * same-region fast path of {@code /data} inside command-block chains —
++     * every read/write would land one tick late. Running inline on the
++     * owning tick thread is safe by Folia's threading contract.</p> */
++    public static <T> CompletableFuture<T> onEntityAsync(final Entity entity, final EntityTask<T> task) {
++        final CompletableFuture<T> future = new CompletableFuture<>();
++        if (TickThread.isTickThreadFor(entity)) {
++            try {
++                future.complete(task.run(entity));
++            } catch (final Throwable t) {
++                future.completeExceptionally(t);
++            }
++        } else {
++            entity.getBukkitEntity().taskScheduler.scheduleOrExecute((Entity scheduled) -> {
++                try {
++                    future.complete(task.run(scheduled));
++                } catch (final Throwable t) {
++                    future.completeExceptionally(t);
++                }
++            });
++        }
++        return future;
++    }
++
++    // ----------------------------------------------------------------
++    //  Global tick primitives — for server-global data (e.g. scoreboard)
++    // ----------------------------------------------------------------
++
++    /**
++     * Execute on the Folia global tick thread, without blocking the caller.
++     *
++     * <p>Server-global state (scoreboard, registries, gamerules...) is only
++     * safe to touch on the global tick thread. Commands that mutate such state
++     * (e.g. {@code /scoreboard}) dispatch their work through this primitive and
++     * route feedback back via {@link #runOnSource}. When the calling thread IS
++     * the global tick thread (console commands), the task runs inline and the
++     * returned future is already completed — the same-region fast path.</p>
++     */
++    public static <T> CompletableFuture<T> onGlobalAsync(final BlockTask<T> task) {
++        if (io.papermc.paper.threadedregions.RegionizedServer.isGlobalTickThread()) {
++            final CompletableFuture<T> future = new CompletableFuture<>();
++            complete(future, task);
++            return future;
++        }
++        final CompletableFuture<T> future = new CompletableFuture<>();
++        io.papermc.paper.threadedregions.RegionizedServer.getInstance().addTask(() -> complete(future, task));
++        return future;
++    }
++
++    /**
++     * Blocking legacy variant of {@link #onGlobalAsync}: waits up to 2s for the
++     * global tick thread to run the task. Only safe on a non-tick thread; on a
++     * tick thread it warns once (see {@link #await}) but keeps working.
++     */
++    public static <T> T onGlobal(final BlockTask<T> task) throws CommandSyntaxException {
++        return await(onGlobalAsync(task));
++    }
++
++    // ----------------------------------------------------------------
++    //  Blocking (legacy) variants — fail fast on a tick thread
++    // ----------------------------------------------------------------
++
++    public static <T> T onBlock(final ServerLevel level, final BlockPos pos, final BlockTask<T> task) throws CommandSyntaxException {
++        return await(onBlockAsync(level, pos, task));
++    }
++
++    public static <T> T onBlockRegion(final ServerLevel level, final int cx, final int cz, final BlockTask<T> task) throws CommandSyntaxException {
++        return await(onBlockRegionAsync(level, cx, cz, task));
++    }
++
++    public static <T> T onEntity(final Entity entity, final EntityTask<T> task) throws CommandSyntaxException {
++        return await(onEntityAsync(entity, task));
++    }
++
++    // ----------------------------------------------------------------
++    //  Thread context helpers
++    // ----------------------------------------------------------------
++
++    /** True when the calling thread is a Folia tick (region/global/shutdown) thread. */
++    public static boolean isTickThread() {
++        return TickThread.isTickThread();
++    }
++
++    /**
++     * Route a feedback callback (sendSuccess/sendFailure) back onto the source's
++     * owning region. Console sources have a null level and run inline.
++     */
++    public static void runOnSource(final CommandSourceStack source, final Runnable action) {
++        final ServerLevel level = source.getLevel();
++        if (level == null) {
++            action.run();
++            return;
++        }
++        final int cx = Mth.floor(source.getPosition().x) >> 4;
++        final int cz = Mth.floor(source.getPosition().z) >> 4;
++        io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
++            .queueOrExecuteTickTask(level, cx, cz, action);
++    }
++
++    private static <T> void complete(final CompletableFuture<T> future, final BlockTask<T> task) {
++        try {
++            future.complete(task.run());
++        } catch (final Throwable t) {
++            future.completeExceptionally(t);
++        }
++    }
++
++    private static <T> T await(final CompletableFuture<T> future) throws CommandSyntaxException {
++        if (TickThread.isTickThread()) {
++            // The optimal path is onBlockAsync/onEntityAsync. Some synchronous
++            // commands (notably /data) still block because their Brigadier
++            // interface returns a value synchronously; warn once so the
++            // anti-pattern is never silent, but keep them working.
++            if (TICK_BLOCK_WARNED.compareAndSet(false, true)) {
++                System.err.println(
++                    "[AzureBranches] WARNING: blocking a tick/region thread on cross-region work. "
++                    + "Prefer onBlockAsync/onEntityAsync + callback (see RegionCommandExecutor)."
++                );
++            }
++        }
++        try {
++            return future.get(TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
++        } catch (final TimeoutException e) {
++            throw ERROR_TIMEOUT.create();
++        } catch (final InterruptedException e) {
++            Thread.currentThread().interrupt();
++            throw ERROR_TIMEOUT.create();
++        } catch (final ExecutionException e) {
++            return unwrap(e);
++        }
++    }
++
++    /** Re-throw the cause of a failed cross-region task, preserving command errors. */
++    public static <T> T unwrap(final ExecutionException e) throws CommandSyntaxException {
++        final Throwable cause = e.getCause();
++        if (cause instanceof CommandSyntaxException cse) {
++            throw cse;
++        }
++        if (cause instanceof RuntimeException re) {
++            throw re;
++        }
++        throw new RuntimeException(cause);
++    }
++}
+diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
+index ce90a4e..c5e709a 100644
+--- a/net/minecraft/world/level/block/CommandBlock.java
++++ b/net/minecraft/world/level/block/CommandBlock.java
+@@ -227,7 +227,7 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+                                         final Direction direction) {
+         final com.azurebranches.command.ChainHead head =
+             com.azurebranches.command.ChainHead.resolve(level, headPosBlock.asLong());
+-        final long traversalId = head.startTraversal();
++        final long traversalId = head.startTraversal(level.getSeed()); // EXP3 deterministic seed
+         if (traversalId < 0L) {
+             return;
+         }
+@@ -250,6 +250,8 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+                                      final com.azurebranches.command.PhaseSnapshot phaseSnap) {
+         final java.util.LinkedHashMap<Long, java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>>
+             batchRegistry = new java.util.LinkedHashMap<>();
++        final java.util.List<java.util.concurrent.CompletableFuture<Boolean>> chainFutures =
++            new java.util.ArrayList<>(4); // EXP6Plus: scoreboard/global futures
+         int batchStepCount = 0;
+         int walkRemaining = remaining;
+         BlockPos lastRunPos = null;
+@@ -268,6 +270,11 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+                 break;
+             }
+ 
++            // EXP3: savepoint for partial rollback
++            if (commandBlock.isConditional()
++                && com.azurebranches.command.PhaseValidator.isEnabled()) {
++                phaseSnap.createSavepoint(pos.asLong(), direction.get3DDataValue());
++            }
+             if (commandBlock.isConditional() && !commandBlock.markConditionMet()) {
+                 commandBlock.getCommandBlock().setSuccessCount(0);
+                 break;
+@@ -284,6 +291,7 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+                 } finally {
+                     ctx = com.azurebranches.command.ExpChainSupport.closeContext();
+                 }
++                chainFutures.addAll(ctx.futures); // EXP6Plus
+ 
+                 if (!shouldContinue) {
+                     break;
+@@ -294,7 +302,7 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+                 }
+                 lastRunPos = pos.immutable();
+ 
+-                if (!ctx.deferredByRegion.isEmpty()) {
++                if (!ctx.deferredByRegion.isEmpty() || !ctx.futures.isEmpty()) { // EXP6Plus
+                     for (final java.util.Map.Entry<Long, java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>>
+                          e : ctx.deferredByRegion.entrySet()) {
+                         batchRegistry.computeIfAbsent(e.getKey(), k -> new java.util.ArrayList<>())
+@@ -306,10 +314,10 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+                     final boolean sizeBoundary =
+                         batchStepCount >= com.azurebranches.command.ExpChainSupport.maxBatchSize();
+ 
+-                    if (conditionalBoundary || sizeBoundary) {
++                    if (conditionalBoundary || sizeBoundary || !ctx.futures.isEmpty()) { // EXP6Plus
+                         dispatchAndSuspend(head, level, headBlock, firstBatchPos, pos.immutable(),
+                             direction, walkRemaining, batchRegistry, batchStepCount,
+-                            phaseStartPos, phaseStartDir);
++                            phaseStartPos, phaseStartDir, chainFutures); // EXP6Plus
+                         return;
+                     }
+                 } else {
+@@ -333,9 +341,9 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+             LOGGER.warn("Command Block chain tried to execute more than {} steps!", limit);
+         }
+ 
+-        if (!batchRegistry.isEmpty()) {
++        if (!batchRegistry.isEmpty() || !chainFutures.isEmpty()) { // EXP6Plus
+             dispatchAndSuspend(head, level, headBlock, firstBatchPos, lastRunPos, direction,
+-                walkRemaining, batchRegistry, batchStepCount, phaseStartPos, phaseStartDir);
++                walkRemaining, batchRegistry, batchStepCount, phaseStartPos, phaseStartDir, chainFutures);
+         } else {
+             // Phase-Based: clear snapshot at chain end
+             com.azurebranches.command.ExpChainSupport.clearPhaseSnapshot();
+@@ -350,7 +358,8 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+         final Direction currentDirection, final int remaining,
+         final java.util.LinkedHashMap<Long,
+             java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>> batchRegistry,
+-        final int batchStepCount, final BlockPos phaseStartPos, final Direction phaseStartDir) {
++        final int batchStepCount, final BlockPos phaseStartPos, final Direction phaseStartDir,
++        final java.util.List<java.util.concurrent.CompletableFuture<Boolean>> chainFutures) { // EXP6Plus
+ 
+         com.azurebranches.command.ExpChainSupport.onSuspend();
+ 
+@@ -369,6 +378,9 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+ 
+         final java.util.List<java.util.concurrent.CompletableFuture<Void>> regionFutures =
+             new java.util.ArrayList<>(batchRegistry.size());
++        for (final java.util.concurrent.CompletableFuture<Boolean> chainFuture : chainFutures) {
++            regionFutures.add(chainFuture.handle((v, ex) -> null)); // EXP6Plus barrier
++        }
+ 
+         for (final java.util.Map.Entry<Long,
+              java.util.List<com.azurebranches.command.ExpChainSupport.DeferredEntry>> e
+@@ -409,6 +421,8 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+             com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
+         final long[] pendingWrites = currentPhaseSnap != null
+             ? currentPhaseSnap.getPendingWritePositions() : null;
++        final long[] readSetPos = currentPhaseSnap != null
++            ? currentPhaseSnap.getReadSetPositions() : null;
+ 
+         final com.azurebranches.command.Continuation cont;
+         if (pendingWrites != null && pendingWrites.length > 0) {
+@@ -418,6 +432,7 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+             cont = head.createContinuation(lastRunPos.asLong(), currentDirection.get3DDataValue(),
+                 remaining, batchStepCount);
+         }
++        cont.readSetPositions = readSetPos; // EXP3
+         // EXP4: attach the captured pre-write old states and the Phase start
+         // so an OCC conflict can restore the world and replay the whole Phase.
+         cont.oldStateCapture = oldStateCapture;
+@@ -444,6 +459,13 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+                         if (ex != null) {
+                             com.azurebranches.command.ExpChainSupport.onTimeout("<command block chain>");
+                         }
++                        // EXP6Plus: capture cross-Phase carries after the barrier
++                        cont.entityReadCarry = currentPhaseSnap != null
++                            ? new java.util.HashMap<>(currentPhaseSnap.getEntityReadSetValues()) : null;
++                        cont.oldScoreValuesCarry = currentPhaseSnap != null
++                            ? new java.util.HashMap<>(currentPhaseSnap.getOldScoreValues()) : null;
++                        cont.scoreCacheCarry = currentPhaseSnap != null
++                            ? new java.util.HashMap<>(currentPhaseSnap.getScoreCache()) : null;
+                         head.removeContinuation(cont);
+                         aggregateAndResume(head, level, headBlock, cont, firstBatchPos, batchRegistry);
+                     });
+@@ -482,8 +504,561 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+         // AzureBranches start - Phase-Based: create new PhaseSnapshot for resumed Phase
+         final com.azurebranches.command.PhaseSnapshot nextPhaseSnap =
+             com.azurebranches.command.PhaseSnapshot.fromContinuation(cont, level.getGameTime());
+-        walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, nextPhaseSnap);
++        verifyReadSetAndResume(head, level, headBlock, cont, resumePos, resumeDir, nextPhaseSnap);
+         // AzureBranches end - Phase-Based snapshot
+     }
++    // AzureBranches start - EXP4: OCC rollback & retry (wired by build script)
++    private static void rollbackAndRetryExpChain(
++        final com.azurebranches.command.ChainHead head,
++        final ServerLevel level, final BlockPos headBlock,
++        final com.azurebranches.command.Continuation cont,
++        final com.azurebranches.command.PhaseSnapshot phaseSnap) {
++
++        // EXP5Plus P2: scoreboard compensation must run on the global tick
++        // thread (scoreboard is server-global data). EXP6: entity-NBT
++        // compensation must run per-entity on each entity's OWNING REGION
++        // thread 鈥?this fixes the P2 latent bug where it ran on the global
++        // tick thread. Run all compensation async first, then chain block
++        // restore + replay. Compensation is best-effort and logs failures
++        // internally.
++        final java.util.List<java.util.concurrent.CompletableFuture<Void>> compensationFutures =
++            new java.util.ArrayList<>(4);
++        // EXP6Plus: ghost-score guard 鈥?collect the scoreboard identities of
++        // entities that already vanished, so score compensation never
++        // recreates a score entry for a dead entity (getOrCreatePlayerScore
++        // would silently resurrect a ghost holder).
++        final java.util.Set<String> deadHolderNames = new java.util.HashSet<>();
++        for (final java.util.Map.Entry<Integer, String> e : phaseSnap.getEntityReadSetValues().entrySet()) {
++            final net.minecraft.world.entity.Entity ghostCheck = level.getEntity(e.getKey());
++            // !isAlive() covers the death-animation window: the entity is
++            // dead but not yet discarded, so level.getEntity still returns it.
++            if (ghostCheck == null || !ghostCheck.isAlive()) {
++                deadHolderNames.add(e.getValue());
++            }
++        }
++        compensationFutures.add(
++            net.minecraft.server.commands.RegionCommandExecutor.<Void>onGlobalAsync(() -> {
++            try {
++                com.azurebranches.command.ScoreLayer.compensate(phaseSnap,
++                    (objective, holder) -> level.getScoreboard().getOrCreatePlayerScore(
++                        net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
++                        level.getScoreboard().getObjective(objective)).get(),
++                    (objective, holder, value) -> {
++                        if (deadHolderNames.contains(holder)) {
++                            // EXP6Plus ghost-score guard: the holder's entity
++                            // died. Folia disabled Scoreboard.entityRemoved
++                            // (ServerLevel comments the call out), so dead
++                            // entities' score entries survive on their own.
++                            // Emulate the vanilla clear instead of writing a
++                            // value back 鈥?never resurrect or refresh a ghost.
++                            com.azurebranches.command.ExpChainSupport.onScoreCompensationFailed();
++                            final net.minecraft.world.scores.Objective ghostObj =
++                                level.getScoreboard().getObjective(objective);
++                            if (ghostObj != null) {
++                                level.getScoreboard().resetSinglePlayerScore(
++                                    net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
++                                    ghostObj);
++                            }
++                            return;
++                        }
++                        level.getScoreboard().getOrCreatePlayerScore(
++                            net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
++                            level.getScoreboard().getObjective(objective)).set(value);
++                    });
++            } catch (final Throwable t) {
++                System.err.println("[AzureBranches] score compensation wiring failed: " + t.getMessage());
++            }
++            return null;
++        }));
++        for (final int entityId : com.azurebranches.command.EntityLayer.entityIdsOf(phaseSnap)) {
++            final net.minecraft.world.entity.Entity targetEntity = level.getEntity(entityId);
++            if (targetEntity == null) {
++                continue;
++            }
++            compensationFutures.add(
++                net.minecraft.server.commands.RegionCommandExecutor.<Void>onEntityAsync(targetEntity, scheduled -> {
++                    try {
++                        com.azurebranches.command.EntityLayer.compensateFor(phaseSnap, entityId,
++                            (eid, path) -> readEntityNbtPath(level, eid, path),
++                            (eid, path, value) -> writeEntityNbtPath(level, eid, path, value));
++                    } catch (final Throwable t) {
++                        System.err.println("[AzureBranches] entity-NBT compensation wiring failed: " + t.getMessage());
++                    }
++                    return null;
++                }));
++        }
++        java.util.concurrent.CompletableFuture.allOf(
++            compensationFutures.toArray(new java.util.concurrent.CompletableFuture[0]))
++            .handle((v, ex) -> null).thenRun(() -> {
++
++        final java.util.Map<Long, Object> oldStates = phaseSnap.getOldBlockStates();
++        if (oldStates == null || oldStates.isEmpty()) {
++            // Nothing to roll back 鈥?retry from the Phase start on the head region
++            io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
++                .queueOrExecuteTickTask(level, headBlock.getX() >> 4, headBlock.getZ() >> 4, () -> {
++                    if (!head.isCurrent(cont)) {
++                        com.azurebranches.command.ExpChainSupport.onSupersede();
++                        return;
++                    }
++                    retryExpChainPhase(head, level, headBlock, cont, phaseSnap);
++                });
++            return;
++        }
++
++        // Group old states by target region (restoration must run on each
++        // region's own thread).
++        final java.util.Map<Long, java.util.Map<BlockPos,
++            net.minecraft.world.level.block.state.BlockState>> byRegion = new java.util.HashMap<>();
++        for (final java.util.Map.Entry<Long, Object> e : oldStates.entrySet()) {
++            if (!(e.getValue() instanceof final net.minecraft.world.level.block.state.BlockState bs)) {
++                continue;
++            }
++            final BlockPos pos = BlockPos.of(e.getKey());
++            final int cx = pos.getX() >> 4;
++            final int cz = pos.getZ() >> 4;
++            byRegion.computeIfAbsent(((long) cx << 32) | (cz & 0xFFFF_FFFFL),
++                k -> new java.util.HashMap<>()).put(pos, bs);
++        }
++
++        final java.util.List<java.util.concurrent.CompletableFuture<Void>> regionFutures =
++            new java.util.ArrayList<>(byRegion.size());
++        for (final java.util.Map.Entry<Long,
++             java.util.Map<BlockPos, net.minecraft.world.level.block.state.BlockState>> e
++             : byRegion.entrySet()) {
++            final int targetCx = (int) (e.getKey() >> 32);
++            final int targetCz = (int) (e.getKey() & 0xFFFF_FFFFL);
++            final java.util.Map<BlockPos, net.minecraft.world.level.block.state.BlockState> restores =
++                e.getValue();
++            final java.util.concurrent.CompletableFuture<Void> regionDone =
++                new java.util.concurrent.CompletableFuture<>();
++            io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
++                .queueOrExecuteTickTask(level, targetCx, targetCz, () -> {
++                    try {
++                        for (final java.util.Map.Entry<BlockPos,
++                             net.minecraft.world.level.block.state.BlockState> r
++                             : restores.entrySet()) {
++                            try {
++                                level.setBlock(r.getKey(), r.getValue(), 3);
++                            } catch (final Exception restoreEx) {
++                                // EXP4: a failed restore leaves the world partially
++                                // rolled back 鈥?log it so it is never silent.
++                                System.err.println("[AzureBranches] rollback restore failed at "
++                                    + r.getKey() + ": " + restoreEx.getMessage());
++                            }
++                        }
++                    } finally {
++                        regionDone.complete(null);
++                    }
++                });
++            regionFutures.add(regionDone);
++        }
++
++        java.util.concurrent.CompletableFuture.allOf(
++            regionFutures.toArray(new java.util.concurrent.CompletableFuture[0]))
++            .whenComplete((v, ex) ->
++                io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
++                    .queueOrExecuteTickTask(level, headBlock.getX() >> 4, headBlock.getZ() >> 4, () -> {
++                        if (!head.isCurrent(cont)) {
++                            com.azurebranches.command.ExpChainSupport.onSupersede();
++                            return;
++                        }
++                        retryExpChainPhase(head, level, headBlock, cont, phaseSnap);
++                    }));
++        });
++    }
++
++    private static void retryExpChainPhase(
++        final com.azurebranches.command.ChainHead head,
++        final ServerLevel level, final BlockPos headBlock,
++        final com.azurebranches.command.Continuation cont,
++        final com.azurebranches.command.PhaseSnapshot phaseSnap) {
++
++        // The world has been restored to its pre-Phase state 鈥?replay the
++        // whole Phase from its start, re-reading the world.
++        phaseSnap.resetForRetry();
++        final BlockPos.MutableBlockPos retryPos = BlockPos.of(cont.phaseStartPos).mutable();
++        final Direction retryDir = Direction.from3DDataValue(cont.phaseStartDir);
++        walkExpChain(head, level, headBlock, retryPos, retryDir,
++            cont.remaining + cont.stepCount, phaseSnap);
++    }
++
++    // EXP5 P0#2 / EXP6: entity-NBT path read/write helpers for EntityLayer
++    // compensation and read-set verification. These run on the entity's own
++    // region thread (EXP6: per-entity onEntityAsync dispatch). Supported path
++    // forms (matching EntityLayer keys):
++    //   "Health"  "Pos[0]"  "foo/bar"  "Inventory{Slot:0b}"  "Inventory{Slot:0b}/id"
++    private static Object leafOf(final net.minecraft.nbt.Tag value) {
++        if (value instanceof net.minecraft.nbt.NumericTag num) {
++            return num.box();
++        }
++        if (value instanceof net.minecraft.nbt.StringTag str) {
++            return str.value();
++        }
++        return value; // compound/list 鈥?compared structurally via equals()
++    }
++
++    private static Object readEntityNbtPath(final ServerLevel level, final int entityId, final String path) {
++        final net.minecraft.world.entity.Entity entity = level.getEntity(entityId);
++        if (entity == null) {
++            return null;
++        }
++        final net.minecraft.nbt.CompoundTag tag =
++            net.minecraft.advancements.predicates.NbtPredicate.getEntityTagToCompare(entity);
++        final int brace = path.indexOf('{');
++        final int bracket = path.indexOf('[');
++        if (brace >= 0) {
++            // Slot path: "Inventory{Slot:0b}[/sub]" 鈥?locate the list entry by
++            // its stable slot descriptor instead of a list index.
++            final int slash = path.indexOf('/', brace);
++            final String containerName = path.substring(0, brace);
++            final int eq = path.indexOf(':', brace);
++            final int closeBrace = path.indexOf('}', brace);
++            if (eq < 0 || closeBrace < 0) {
++                return null;
++            }
++            final String slotFieldName = path.substring(brace + 1, eq).trim();
++            final String slotValueRaw = path.substring(eq + 1, closeBrace).trim();
++            final net.minecraft.nbt.Tag listTag = tag.get(containerName);
++            if (listTag instanceof net.minecraft.nbt.ListTag list) {
++                for (final net.minecraft.nbt.Tag item : list) {
++                    if (item instanceof net.minecraft.nbt.CompoundTag compound
++                        && compound.get(slotFieldName) != null
++                        && compound.get(slotFieldName).toString().equals(slotValueRaw)) {
++                        if (slash >= 0) {
++                            return leafOf(compound.get(path.substring(slash + 1)));
++                        }
++                        return compound.copy();
++                    }
++                }
++            }
++            return null;
++        }
++        if (bracket >= 0) {
++            // Vector path: "Pos[0]"
++            final int close = path.indexOf(']', bracket);
++            final String name = path.substring(0, bracket);
++            final int idx = Integer.parseInt(path.substring(bracket + 1, close));
++            final net.minecraft.nbt.Tag listTag = tag.get(name);
++            return (listTag instanceof net.minecraft.nbt.ListTag list) ? leafOf(list.get(idx)) : null;
++        }
++        final int slash = path.indexOf('/');
++        if (slash >= 0) {
++            // Compound sub-field: "foo/bar"
++            final net.minecraft.nbt.Tag sub = tag.get(path.substring(0, slash));
++            if (sub instanceof net.minecraft.nbt.CompoundTag compound) {
++                return leafOf(compound.get(path.substring(slash + 1)));
++            }
++            return null;
++        }
++        return leafOf(tag.get(path));
++    }
++
++    private static void writeEntityNbtPath(final ServerLevel level, final int entityId, final String path, final Object value) {
++        final net.minecraft.world.entity.Entity entity = level.getEntity(entityId);
++        if (entity == null) {
++            return;
++        }
++        final net.minecraft.nbt.CompoundTag tag =
++            net.minecraft.advancements.predicates.NbtPredicate.getEntityTagToCompare(entity);
++        final net.minecraft.nbt.Tag converted = toNbtTag(value);
++        final java.util.UUID uuid = entity.getUUID();
++        final int brace = path.indexOf('{');
++        final int bracket = path.indexOf('[');
++        if (brace >= 0) {
++            // Slot path: "Inventory{Slot:0b}[/sub]"
++            final int slash = path.indexOf('/', brace);
++            final String containerName = path.substring(0, brace);
++            final int eq = path.indexOf(':', brace);
++            final int closeBrace = path.indexOf('}', brace);
++            if (eq < 0 || closeBrace < 0) {
++                return;
++            }
++            final String slotFieldName = path.substring(brace + 1, eq).trim();
++            final String slotValueRaw = path.substring(eq + 1, closeBrace).trim();
++            final net.minecraft.nbt.Tag listTag = tag.get(containerName);
++            if (listTag instanceof net.minecraft.nbt.ListTag list) {
++                int found = -1;
++                for (int i = 0; i < list.size() && found < 0; i++) {
++                    final net.minecraft.nbt.Tag item = list.get(i);
++                    if (item instanceof net.minecraft.nbt.CompoundTag compound
++                        && compound.get(slotFieldName) != null
++                        && compound.get(slotFieldName).toString().equals(slotValueRaw)) {
++                        found = i;
++                    }
++                }
++                if (found >= 0) {
++                    if (slash >= 0) {
++                        final net.minecraft.nbt.CompoundTag copy = list.getCompoundOrEmpty(found).copy();
++                        copy.put(path.substring(slash + 1), converted);
++                        list.set(found, copy);
++                    } else if (converted instanceof net.minecraft.nbt.CompoundTag replacement) {
++                        list.set(found, replacement);
++                    }
++                } else if (slash < 0 && converted instanceof net.minecraft.nbt.CompoundTag replacement) {
++                    // The slot entry was removed 鈥?re-append it; the Slot value
++                    // inside the compound preserves the semantic slot identity.
++                    list.add(replacement.copy());
++                }
++            }
++        } else if (bracket >= 0) {
++            final int close = path.indexOf(']', bracket);
++            final String name = path.substring(0, bracket);
++            final int idx = Integer.parseInt(path.substring(bracket + 1, close));
++            final net.minecraft.nbt.Tag listTag = tag.get(name);
++            if (listTag instanceof net.minecraft.nbt.ListTag list) {
++                list.set(idx, converted);
++            }
++        } else {
++            final int slash = path.indexOf('/');
++            if (slash >= 0) {
++                final net.minecraft.nbt.Tag sub = tag.get(path.substring(0, slash));
++                if (sub instanceof net.minecraft.nbt.CompoundTag compound) {
++                    compound.put(path.substring(slash + 1), converted);
++                }
++            } else {
++                tag.put(path, converted);
++            }
++        }
++        try (net.minecraft.util.ProblemReporter.ScopedCollector reporter =
++                 new net.minecraft.util.ProblemReporter.ScopedCollector(entity.problemPath(), com.mojang.logging.LogUtils.getLogger())) {
++            entity.load(net.minecraft.world.level.storage.TagValueInput.create(reporter, entity.registryAccess(), tag));
++            entity.setUUID(uuid);
++        }
++    }
++
++    private static net.minecraft.nbt.Tag toNbtTag(final Object value) {
++        if (value instanceof Number num) {
++            if (value instanceof Double || value instanceof Float) {
++                return net.minecraft.nbt.DoubleTag.valueOf(num.doubleValue());
++            }
++            return net.minecraft.nbt.IntTag.valueOf(num.intValue());
++        }
++        if (value instanceof String s) {
++            return net.minecraft.nbt.StringTag.valueOf(s);
++        }
++        return (value instanceof net.minecraft.nbt.Tag t) ? t : net.minecraft.nbt.StringTag.valueOf(String.valueOf(value));
++    }
++
++    // EXP5 P0#2: execute deferred entity-lifecycle actions at Phase commit.
++    private static void commitDeferredActions(final ServerLevel level, final com.azurebranches.command.PhaseSnapshot phaseSnap) {
++        if (!phaseSnap.hasDeferredActions()) {
++            return;
++        }
++        for (final com.azurebranches.command.DeferredAction action : phaseSnap.getDeferredActions()) {
++            if (action.type == com.azurebranches.command.DeferredAction.ActionType.KILL
++                || action.type == com.azurebranches.command.DeferredAction.ActionType.TP) {
++                final net.minecraft.world.entity.Entity entity = level.getEntity(action.entityId);
++                if (entity != null) {
++                    entity.getBukkitEntity().taskScheduler.scheduleOrExecute((net.minecraft.world.entity.Entity scheduled) -> {
++                        if (action.type == com.azurebranches.command.DeferredAction.ActionType.KILL) {
++                            scheduled.kill(level);
++                        } else {
++                            scheduled.teleportTo(action.tpX(), action.tpY(), action.tpZ());
++                        }
++                    });
++                }
++            }
++            // SUMMON requires EntityType + the PhaseSnapshot NBT cache; not yet wired.
++        }
++        phaseSnap.clearDeferredActions();
++    }
++
++    // EXP4Plus: verify the Phase read-set against the live world on each
++    // owning region, then commit or rollback + replay. This replaces the
++    // previous empty-read-set validate() call, so an external write to a
++    // position we read now actually triggers an OCC retry.
++    private static void verifyReadSetAndResume(
++        final com.azurebranches.command.ChainHead head,
++        final ServerLevel level, final BlockPos headBlock,
++        final com.azurebranches.command.Continuation cont,
++        final BlockPos.MutableBlockPos resumePos, final Direction resumeDir,
++        final com.azurebranches.command.PhaseSnapshot phaseSnap) {
++
++        if (!com.azurebranches.command.PhaseValidator.isEnabled()) {
++            commitDeferredActions(level, phaseSnap);
++            walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
++            return;
++        }
++
++        final java.util.Map<Long, Object> readValues = phaseSnap.getReadSetValues();
++        final java.util.Map<String, Integer> scoreReadValues = phaseSnap.getScoreReadSetValues();
++        final java.util.Map<String, Object> nbtReadValues = phaseSnap.getNbtReadSetValues();
++        final java.util.Map<Integer, String> entityReadValues = phaseSnap.getEntityReadSetValues();
++        final boolean hasBlockReads = readValues != null && !readValues.isEmpty();
++        final boolean hasScoreReads = scoreReadValues != null && !scoreReadValues.isEmpty();
++        final boolean hasNbtReads = nbtReadValues != null && !nbtReadValues.isEmpty();
++        final boolean hasEntityReads = entityReadValues != null && !entityReadValues.isEmpty();
++        final java.util.Map<String, Boolean> modifiedNbt = new java.util.concurrent.ConcurrentHashMap<>();
++        final java.util.Map<Integer, Boolean> modifiedEntities = new java.util.concurrent.ConcurrentHashMap<>();
++        if (!hasBlockReads && !hasScoreReads && !hasNbtReads && !hasEntityReads) {
++            com.azurebranches.command.ExpChainSupport.onValidationPassed();
++            commitDeferredActions(level, phaseSnap);
++            walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
++            return;
++        }
++
++        final java.util.Map<Long, Boolean> modified = new java.util.concurrent.ConcurrentHashMap<>();
++        final java.util.List<java.util.concurrent.CompletableFuture<Void>> checks =
++            new java.util.ArrayList<>(readValues != null ? readValues.size() : 0);
++        if (hasBlockReads) {
++            for (final java.util.Map.Entry<Long, Object> entry : readValues.entrySet()) {
++                final BlockPos checkPos = BlockPos.of(entry.getKey());
++                final Object expected = entry.getValue();
++                final java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
++                io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
++                    .queueOrExecuteTickTask(level, checkPos.getX() >> 4, checkPos.getZ() >> 4, () -> {
++                        try {
++                            final BlockState current = level.getBlockState(checkPos);
++                            modified.put(entry.getKey(), !java.util.Objects.equals(current, expected));
++                        } finally {
++                            done.complete(null);
++                        }
++                    });
++                checks.add(done);
++            }
++        }
++
++        // EXP5Plus P2: verify the score read-set against the live scoreboard on
++        // the global tick thread (scoreboard is server-global data).
++        final java.util.Map<String, Boolean> modifiedScores = new java.util.concurrent.ConcurrentHashMap<>();
++        if (hasScoreReads) {
++            for (final java.util.Map.Entry<String, Integer> entry : scoreReadValues.entrySet()) {
++                final String key = entry.getKey();
++                final int expected = entry.getValue();
++                final int colon = key.indexOf(':');
++                if (colon < 0) {
++                    continue;
++                }
++                final String objectiveName = key.substring(0, colon);
++                final String holderName = key.substring(colon + 1);
++                checks.add(net.minecraft.server.commands.RegionCommandExecutor.<Void>onGlobalAsync(() -> {
++                    Integer live = null;
++                    final net.minecraft.world.scores.Objective obj = level.getScoreboard().getObjective(objectiveName);
++                    if (obj != null) {
++                        final net.minecraft.world.scores.ReadOnlyScoreInfo info = level.getScoreboard()
++                            .getPlayerScoreInfo(net.minecraft.world.scores.ScoreHolder.forNameOnly(holderName), obj);
++                        if (info != null) {
++                            live = info.value();
++                        }
++                    }
++                    modifiedScores.put(key, live == null || live != expected);
++                    return null;
++                }));
++            }
++        }
++
++        // EXP6: verify the entity-NBT read-set against live entities, grouped
++        // by entity and dispatched onto each entity's owning region thread.
++        if (hasNbtReads) {
++            final java.util.Map<Integer, java.util.List<java.util.Map.Entry<String, Object>>> nbtByEntity =
++                new java.util.HashMap<>();
++            for (final java.util.Map.Entry<String, Object> entry : nbtReadValues.entrySet()) {
++                final int colon = entry.getKey().indexOf(':');
++                if (colon < 0) {
++                    continue;
++                }
++                final int entityId;
++                try {
++                    entityId = Integer.parseInt(entry.getKey().substring(0, colon));
++                } catch (final NumberFormatException e) {
++                    continue;
++                }
++                nbtByEntity.computeIfAbsent(entityId, k -> new java.util.ArrayList<>()).add(entry);
++            }
++            for (final java.util.Map.Entry<Integer, java.util.List<java.util.Map.Entry<String, Object>>> e : nbtByEntity.entrySet()) {
++                final int entityId = e.getKey();
++                final java.util.List<java.util.Map.Entry<String, Object>> entries = e.getValue();
++                final net.minecraft.world.entity.Entity checkEntity = level.getEntity(entityId);
++                if (checkEntity == null) {
++                    // The entity vanished after our read 鈥?treat as conflict.
++                    for (final java.util.Map.Entry<String, Object> entry : entries) {
++                        modifiedNbt.put(entry.getKey(), Boolean.TRUE);
++                    }
++                    continue;
++                }
++                final java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
++                net.minecraft.server.commands.RegionCommandExecutor.<Void>onEntityAsync(checkEntity, scheduled -> {
++                    try {
++                        for (final java.util.Map.Entry<String, Object> entry : entries) {
++                            final int colon = entry.getKey().indexOf(':');
++                            final String path = entry.getKey().substring(colon + 1);
++                            final Object live = readEntityNbtPath(level, entityId, path);
++                            final Object expected = entry.getValue();
++                            modifiedNbt.put(entry.getKey(), !java.util.Objects.equals(live, expected));
++                        }
++                    } finally {
++                        done.complete(null);
++                    }
++                    return null;
++                });
++                checks.add(done);
++            }
++        }
++
++        // EXP6Plus: verify the scoreboard entity read-set 鈥?each entity
++        // resolved by a holder argument must still exist, checked on its own
++        // region thread.
++        if (hasEntityReads) {
++            for (final java.util.Map.Entry<Integer, String> entry : entityReadValues.entrySet()) {
++                final int entityId = entry.getKey();
++                final net.minecraft.world.entity.Entity checkEntity = level.getEntity(entityId);
++                if (checkEntity == null) {
++                    // The entity vanished after our resolution 鈥?conflict.
++                    modifiedEntities.put(entityId, Boolean.TRUE);
++                    continue;
++                }
++                final java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
++                net.minecraft.server.commands.RegionCommandExecutor.<Void>onEntityAsync(checkEntity, scheduled -> {
++                    try {
++                        // Existence is the OCC criterion: a dead/removed entity
++                        // invalidates the holder set this Phase read. !isAlive()
++                        // covers the death-animation window (dead but not yet
++                        // discarded 鈥?still in level.getEntity).
++                        modifiedEntities.put(entityId,
++                            scheduled.isRemoved() || !scheduled.isAlive() || level.getEntity(entityId) == null);
++                    } finally {
++                        done.complete(null);
++                    }
++                    return null;
++                });
++                checks.add(done);
++            }
++        }
++
++        java.util.concurrent.CompletableFuture.allOf(
++            checks.toArray(new java.util.concurrent.CompletableFuture[0]))
++            .whenComplete((v, ex) ->
++                io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue
++                    .queueOrExecuteTickTask(level, headBlock.getX() >> 4, headBlock.getZ() >> 4, () -> {
++                        if (!head.isCurrent(cont)) {
++                            com.azurebranches.command.ExpChainSupport.onSupersede();
++                            return;
++                        }
++                        final com.azurebranches.command.PhaseValidator.ValidationResult result =
++                            com.azurebranches.command.PhaseValidator.validate(phaseSnap, cont.retryCount, modified, modifiedScores, modifiedNbt, modifiedEntities);
++                        switch (result) {
++                            case COMMIT -> {
++                                com.azurebranches.command.ExpChainSupport.onValidationPassed();
++                                commitDeferredActions(level, phaseSnap);
++                                walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
++                            }
++                            case RETRY -> {
++                                com.azurebranches.command.ExpChainSupport.onValidationRetry();
++                                cont.retryCount++;
++                                head.setCarryRetryCount(cont.retryCount);
++                                rollbackAndRetryExpChain(head, level, headBlock, cont, phaseSnap);
++                            }
++                            case RETRY_EXHAUSTED -> {
++                                com.azurebranches.command.ExpChainSupport.onValidationExhausted();
++                                commitDeferredActions(level, phaseSnap);
++                                walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
++                            }
++                            case READ_SET_OVERFLOW -> {
++                                commitDeferredActions(level, phaseSnap);
++                                walkExpChain(head, level, headBlock, resumePos, resumeDir, cont.remaining, phaseSnap);
++                            }
++                        }
++                    }));
++    }
+     // AzureBranches end - EXP suspendable chain implementation (v2)
+ }
