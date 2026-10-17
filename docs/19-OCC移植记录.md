@@ -117,7 +117,12 @@ enabled = false → EXP3 validation disabled (config: validation.enabled=false)
    （实测值 33、`计分写 1`）。所以 `EntitySelector` 跨区域补丁与本主题无关。
 2. **`execute if entity @e[...]` 未触发 ≠ 选择器坏**：同上，实体已死。
 
-## 5.3 C1 的排查进展（未结案）
+3. **真因（第三轮才定位到）**：僵尸高 **1.95 格**，站在 `y=64` 时占据 `y=64~65.9`，
+   而链线的脉冲命令方块正好在 `(x,65,4)` ⇒ 僵尸被**方块窒息致死**（实测
+   `data get entity ... Health` 在不放命令方块时 15 秒仍满血 20.0f）。
+   把僵尸挪到链线外 `(4,64,8)` 并垫落点支撑后，C1/C2/C3 **全部通过**。
+
+## 5.3 C1 的排查过程（已结案）
 
 C1（实体存活 → COMMIT）仍然失败：`retry 0→3`、`SET-OK=0`。本轮排掉了两个环境问题、补了一处真实缺失，
 但**根因尚未定位**，如实记录到这里。
@@ -141,12 +146,23 @@ C1（实体存活 → COMMIT）仍然失败：`retry 0→3`、`SET-OK=0`。本�
 - `PhaseValidator` 里有 **4 个 `validate` 重载**（不委托关系待确认），返回 RETRY 的语句共 7 处，
   我只插桩了 4 处 ⇒ **RETRY 出自未插桩的那几处**（很可能在 6 参重载 `validate(...)` 自己的分支里）。
 
-### 下一步（下一轮第一件事）
+### 结论（已修）
 
-把 `PhaseValidator` 的**全部** `return ValidationResult.RETRY;` 站点插桩（或在 6 参重载入口
-打印 `retryCount/readSet.size()/各 modified map 是否含 TRUE`），复跑
-`tools/smoke/exp6plus_occ_probe.py` 单独用例，直接读出是哪个分支判定冲突。
-拿到分支名后再决定是"排除条件不够"还是"该检查本身有 bug"。
+真因见 §5.2 第 3 条：**僵尸被脉冲命令方块窒息**（不是产品缺陷，是用例摆位错误）。
+修正摆位后 `tools/smoke/exp6plus_occ_probe.py` **7 通过 / 0 失败**，
+唯一的冲突诊断是 C2 预期内那一条：
+`ENTITY_CHK id=2 removed=false dead=true gone=false`（相位内 `damage @s 999999` 打死）。
+
+顺带修掉两个真问题（都保留）：
+  * `0028` 方块写的数据面（`putBlock/markPendingWrite/captureOldState` 之前无调用方）；
+  * `PhaseValidator` 4 个冲突分支增加 `System.err` 诊断（运维排障用，正常路径不打印）。
+
+### 排查中踩的坑（写下来）
+
+1. **差点得出错误结论**：插桩后"一条诊断都没打印"，我一度推断"RETRY 不是 PhaseValidator 给的"。
+   真相是那次插桩把 `println` 插到了 `return` 之后（`unreachable statement`）⇒ **编译失败**，
+   而我把 gradle 输出接了 `| tail -1`，**管道吃掉了失败状态**，于是继续用旧 jar 跑 —— 假阴性。
+   **教训（第二次犯）**：构建命令绝不能把退出码交给管道；必须显式检查 `error:` 与 `BUILD SUCCESSFUL`。
 
 ## 6. 还没做（如实留档）
 

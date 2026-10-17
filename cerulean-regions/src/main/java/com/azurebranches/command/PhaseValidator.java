@@ -234,7 +234,7 @@ public final class PhaseValidator {
                     // This position was modified externally between the read
                     // and now → our read is stale → Phase must retry
                     System.err.println("[CeruLean] EXP3 conflict: CHECK_READ_SET");
-                    return ValidationResult.RETRY;return ValidationResult.RETRY;
+                    return ValidationResult.RETRY;
                 }
             }
         }
@@ -250,7 +250,7 @@ public final class PhaseValidator {
                         // This score key was modified externally between the read
                         // and now → our read is stale → Phase must retry
                         System.err.println("[CeruLean] EXP3 conflict: CHECK_SCORE_READ_SET");
-                        return ValidationResult.RETRY;return ValidationResult.RETRY;
+                        return ValidationResult.RETRY;
                     }
                 }
             }
@@ -267,7 +267,7 @@ public final class PhaseValidator {
                         // This NBT key was modified externally between the read
                         // and now → our read is stale → Phase must retry
                         System.err.println("[CeruLean] EXP3 conflict: CHECK_NBT_READ_SET");
-                        return ValidationResult.RETRY;return ValidationResult.RETRY;
+                        return ValidationResult.RETRY;
                     }
                 }
             }

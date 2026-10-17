@@ -79,8 +79,11 @@ def fresh_zombie():
     # ★ 冒险岛环境：冒烟服是超平坦世界，地面在 y≈-61，在 y=64 直接 summon 会**摔死**，
     # 于是链里 `@e[type=zombie,limit=1]` 解析不到实体（表现为分数写不进去、看起来像 OCC 误判）。
     # 垫一块落点支撑即可。注意**不能**用 Invulnerable —— C2 需要在相位内把实体打死。
-    one('setblock 4 63 4 minecraft:stone')
-    one('summon minecraft:zombie 4 64 4 {NoAI:1b,PersistenceRequired:1b,UUID:[I;1,2,3,4]}')
+    # ★ 僵尸高 1.95 格，站在 y=64 时占据 y=64~65.9。链线的命令方块在 (x,65,4..-1)，
+    # 若把僵尸放在 (4,64,4)，它会被**脉冲命令方块窒息致死**（实测 isAlive()=false）。
+    # 因此放在链线之外，(4,64,8)，并垫落点支撑（超平坦地面在 y≈-61，不垫会摔死）。
+    one('setblock 4 63 8 minecraft:stone')
+    one('summon minecraft:zombie 4 64 8 {NoAI:1b,PersistenceRequired:1b,UUID:[I;1,2,3,4]}')
     one(f'scoreboard players set {UUID} exp6p 0')
 
 
