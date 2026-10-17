@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sat, 17 Oct 2026 11:46:31 +0800
+Subject: [PATCH] CeruLean fix: restore null-key tolerance in Scoreboard lookups (issue #1)
+
+---
+修复 issue #1（玩家加入即区域 tick NPE）。
+
+根因：`PlayerList.placeNewPlayer` 第 382 行在 `if (false && ...)`（Folia 关掉了碰撞队伍特性）
+**之外**读取 `this.collideRuleTeamName` 并调用 `Scoreboard.getPlayerTeam(null)`。
+该字段仅在 `collisions.enable-player-collisions: false` 时由 MinecraftServer 初始化，默认 true ⇒ null。
+
+为什么以前不崩：`Scoreboard.teamsByName` 原是 fastutil `Object2ObjectOpenHashMap`，
+其 `get(Object)` 字节码第 1 行 `ifnonnull` 后走 null 分支，**对 null key 返回 null**；
+0022（R1 并发加固）把它换成 `ConcurrentHashMap` 后，`get(null)` 抛
+`NPE: Cannot invoke "Object.hashCode()" because "key" is null` ⇒ 区域 tick 异常 ⇒ 关服。
+
+本补丁**保留并发加固**，只恢复原来的 null 容忍语义（3 个可空入口加守卫，
+`getObjective` 的形参本来就标了 @Nullable，是同类潜在雷，一并加固）。
+
+不推荐回退 0022：那会丢掉跨区域并发安全性（docs/17 §2）。
+
+漏网原因如实记录：现有 tools/smoke 套件是 RCON 驱动、**没有真实客户端**，
+不覆盖"玩家真正加入"这条路径；因此该回归未被本地验收发现。
+---
+diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
+index 45a6eb4..169083b 100644
+--- a/net/minecraft/world/scores/Scoreboard.java
++++ b/net/minecraft/world/scores/Scoreboard.java
+@@ -56,7 +56,8 @@ public class Scoreboard {
+     // CeruLean end
+ 
+     public @Nullable Objective getObjective(final @Nullable String name) {
+-        return this.objectivesByName.get(name);
++        // CeruLean: ConcurrentHashMap 不容忍 null key（fastutil 的 Object2ObjectOpenHashMap 会返回 null）⇒ 显式守卫
++        return name == null ? null : this.objectivesByName.get(name);
+     }
+ 
+     public Objective addObjective(
+@@ -337,7 +338,9 @@ public class Scoreboard {
+     }
+ 
+     public @Nullable PlayerTeam getPlayerTeam(final String name) {
+-        return this.teamsByName.get(name);
++        // CeruLean: PlayerList.placeNewPlayer 会传 null（collideRuleTeamName 在
++        // collisions.enable-player-collisions=true 时未初始化）。CHM 会抛 NPE，必须守卫。
++        return name == null ? null : this.teamsByName.get(name);
+     }
+ 
+     public PlayerTeam addPlayerTeam(final String name) {
+@@ -420,7 +423,7 @@ public class Scoreboard {
+     }
+ 
+     public @Nullable PlayerTeam getPlayersTeam(final String name) {
+-        return this.teamsByPlayer.get(name);
++        return name == null ? null : this.teamsByPlayer.get(name); // CeruLean: 同上
+     }
+ 
+     public void onObjectiveAdded(final Objective objective) {
