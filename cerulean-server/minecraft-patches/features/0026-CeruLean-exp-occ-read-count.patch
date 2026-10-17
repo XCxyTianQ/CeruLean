@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sat, 17 Oct 2026 22:57:57 +0800
+Subject: [PATCH] CeruLean EXP OCC: count block read-set recording (observability for EXP3)
+
+---
+OCC 的方块读集是否真的被填过，必须有直接判据。
+既有的 dataInterceptBlockRead 只在**缓存命中**时 +1（未命中才是常态，它会是 0），
+不足以证明读集非空 —— 读集为空时 PhaseValidator 只是在空集上"通过"，等于 OCC 没生效。
+因此新增 onBlockReadRecorded()：每次 Level.getBlockState 真的把读数记进 PhaseSnapshot 时 +1，
+并在 /cerulean exp 的"数据面"行输出（读集记录 N）。
+---
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index f99562b..eef318b 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1376,6 +1376,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         if (_exp4snap != null) {
+             _exp4snap.recordRead(pos.asLong(), _result,
+                 this instanceof net.minecraft.server.level.ServerLevel _sl ? _sl.getGameTime() : 0L);
++            // CeruLean: 读集真的被记录了一次（OCC 是否生效的唯一直接判据，见 /cerulean exp）
++            com.azurebranches.command.ExpChainSupport.onBlockReadRecorded();
+         }
+         return _result;
+         // CeruLean end - EXP4 data pool interception

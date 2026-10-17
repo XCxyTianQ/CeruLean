@@ -207,6 +207,25 @@ if MODE == 'EXP':
     inl1, dfr1 = exp_counter('内联'), exp_counter('跨区域')
     print(f"  登记（内联/跨区域）= {inl1}/{dfr1} 挂起/恢复 = {susp1}/{resm1}")
 
+    # ★ OCC 是否真的在工作：数据面钩子必须被走到（否则读集恒空、PhaseValidator 永不触发），
+    # 且链尾的读集校验必须真的跑过一次（validationPassed ≥ 1）。
+    occ = one('/cerulean exp')
+
+    def occ_nums(pattern):
+        m = re.search(pattern, occ)
+        return m.groups() if m else None
+
+    # 注意：不要用"方块读"（= 缓存命中次数）当判据 —— 缓存未命中才是常态，它会是 0。
+    # 真正的判据是"读集记录数"，即 OCC 的方块读集到底有没有被填过。
+    m_data = re.search(r'读集记录 (\d+)', occ)
+    recorded = int(m_data.group(1)) if m_data else -1
+    record('OCC 数据面 · Level.getBlockState 钩子被走到（读集记录非空）',
+           '/cerulean exp', f'读集记录={recorded}', recorded > 0)
+    m_val = re.search(r'通过 (\d+) / 重试 (\d+) / 耗尽 (\d+)', occ)
+    passed = int(m_val.group(1)) if m_val else -1
+    record('OCC 校验 · 链尾读集校验真的跑过（validationPassed ≥ 1）',
+           '/cerulean exp', f'通过={passed}', passed >= 1)
+
     # 确定性判据：命令侧（SetBlockCommand 的 EXP 分支）真的调用了 registerDeferred。
     # 只落链本体（0020）而不接 0021 时，这个计数**永远不会增长**（走的是上游 fire-and-forget）。
     record('跨区域链 · 命令侧确实接进了 EXP 上下文（registerDeferred 被调用）',

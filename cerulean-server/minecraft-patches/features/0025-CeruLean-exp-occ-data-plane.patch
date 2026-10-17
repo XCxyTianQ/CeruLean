@@ -1,0 +1,200 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sat, 17 Oct 2026 22:48:55 +0800
+Subject: [PATCH] CeruLean EXP OCC data plane: block read-set, score interception, entity read-set
+
+---
+EXP OCC 的**数据面**接线（第一步只有 CommandBlock 的判定/回滚逻辑，读集恒空 ⇒ PhaseValidator 永不触发）。
+
+三个钩子（逐个说明为什么必须在 26.3 上重新定位）：
+
+1) `Level.getBlockState` —— EXP4 数据池（方块域）
+   26.1 的锚点是 `} else {`，而 **26.3 的 getBlockState 没有这个分支**（结构改成"bounds 检查 + 直接取 chunk"）。
+   因此在 bounds 检查之后、取 chunk 之前挂钩：
+     * 命中 PhaseSnapshot.getCached(pos) ⇒ 直接返回（同一 Phase 内"读己写"可见），计 onDataInterceptBlockRead；
+     * 否则读真实方块并 recordRead(pos, state, gameTime) —— 读集 + 观测值，供 OCC 校验。
+   取 gameTime 用 `this instanceof ServerLevel sl ? sl.getGameTime() : 0L`（upstream 直接强转，26.3 保持安全写法）。
+
+2) `Scoreboard` —— EXP5Plus 计分域（读 / 写 / 删三个点）
+   * 读：`getPlayerScoreInfo` 原样可套（缓存命中返回匿名 ReadOnlyScoreInfo；否则 recordScoreRead）；
+   * 写：upstream 锚在 `} else { boolean hasChanged = ...`，但 CeruLean 的 R1（0022）已把
+     `set/add/increment/reset` 统一到 `mutate(IntUnaryOperator)` 并在 `stateLock` 内执行
+     ⇒ 钩子改落 **mutate() 锁内、写之前**，记 `putScore(key, newValue, 旧值)` + markPendingScore；
+   * 删：`resetAllPlayerScores` / `resetSinglePlayerScore` 也被 R1 重写过，钩子改落
+     **锁内、移除之前**，遍历/读取旧值后捕获。
+   （upstream 同一批里还有"teamsByName/teamsByPlayer 换 ConcurrentHashMap + null 守卫"两步 ——
+     CeruLean 的 0022/0023 已经做了，这里不重复。）
+
+3) `ScoreHolderArgument.getNames` —— EXP6Plus 第四数据域（实体读集）
+   实体型 holder 构成一次"活实体集合"读：逐个 `EntityLayer.recordEntityRead(snap, id, name, tick)`，
+   使 OCC 能复查实体存在性（防幽灵读），并让回滚补偿跳过已死亡 holder。
+   非 EXP 链上下文 snapshot==null ⇒ 零成本 no-op。
+
+库侧零改动（cerulean-regions 的 PhaseSnapshot/ExpChainSupport/EntityLayer 已具备全部所需 API）。
+
+实测：`applyAllPatches` ✓、`:cerulean-server:compileJava` 零错误。
+---
+diff --git a/net/minecraft/commands/arguments/ScoreHolderArgument.java b/net/minecraft/commands/arguments/ScoreHolderArgument.java
+index 28d3c11..60da3bd 100644
+--- a/net/minecraft/commands/arguments/ScoreHolderArgument.java
++++ b/net/minecraft/commands/arguments/ScoreHolderArgument.java
+@@ -69,7 +69,22 @@ public class ScoreHolderArgument implements ArgumentType<ScoreHolderArgument.Res
+         if (result.isEmpty()) {
+             throw EntityArgument.NO_ENTITIES_FOUND.create();
+         } else {
++            // CeruLean start - EXP6Plus: 实体型 holder 构成一次"活实体集合"的读。
++            // 把每个解析出的实体记进本 Phase 的实体读集，使 OCC 校验能在提交时复查其存在性
++            // （防幽灵读），并让回滚补偿跳过已死亡的 holder（而不是把分数条目复活成幽灵）。
++            // 非 EXP 链上下文时 snapshot 为 null ⇒ 零成本 no-op。
++            final com.azurebranches.command.PhaseSnapshot _snap =
++                com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++            if (_snap != null) {
++                for (final ScoreHolder holder : result) {
++                    if (holder instanceof net.minecraft.world.entity.Entity _entity) {
++                        com.azurebranches.command.EntityLayer.recordEntityRead(
++                            _snap, _entity.getId(), holder.getScoreboardName(), _snap.getSnapshotTick());
++                    }
++                }
++            }
+             return result;
++            // CeruLean end - EXP6Plus entity read-set
+         }
+     }
+ 
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index e53890d..f99562b 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1357,8 +1357,28 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+             return Blocks.VOID_AIR.defaultBlockState();
+         }
+ 
++        // CeruLean start - EXP4: PhaseSnapshot 缓存拦截（链内"读己写"）+ 读集记录（OCC 校验用）
++        // 26.3 的 getBlockState 没有 26.1 那个 `} else {` 分支（结构变了），因此这里挂在
++        // bounds 检查之后、真正取 chunk 之前 —— 语义与 AzureBranches 的注入等价：
++        //   ① 命中 PhaseSnapshot 的缓存 ⇒ 直接返回（同一 Phase 内的写后读看到自己的写）
++        //   ② 否则读真实方块并 recordRead（读集 + 观测值），供 PhaseValidator 做 OCC 校验
++        final com.azurebranches.command.PhaseSnapshot _exp4snap =
++            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++        if (_exp4snap != null) {
++            final Object _cached = _exp4snap.getCached(pos.asLong());
++            if (_cached != null) {
++                com.azurebranches.command.ExpChainSupport.onDataInterceptBlockRead();
++                return (BlockState) _cached;
++            }
++        }
+         ChunkAccess chunk = this.getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.FULL, true); // Paper - manually inline to reduce hops and avoid unnecessary null check to reduce total byte code size, this should never return null and if it does we will see it the next line but the real stack trace will matter in the chunk engine
+-        return chunk.getBlockState(pos);
++        final BlockState _result = chunk.getBlockState(pos);
++        if (_exp4snap != null) {
++            _exp4snap.recordRead(pos.asLong(), _result,
++                this instanceof net.minecraft.server.level.ServerLevel _sl ? _sl.getGameTime() : 0L);
++        }
++        return _result;
++        // CeruLean end - EXP4 data pool interception
+     }
+ 
+     @Override
+diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
+index 169083b..282e4b3 100644
+--- a/net/minecraft/world/scores/Scoreboard.java
++++ b/net/minecraft/world/scores/Scoreboard.java
+@@ -115,6 +115,19 @@ public class Scoreboard {
+                 Scoreboard.this.stateLock.lock();
+                 try {
+                     newValue = op.applyAsInt(score.value());
++                    // CeruLean EXP5Plus: 计分写拦截 —— 记录"写前旧值"用于 OCC 回滚，
++                    // 并标记 pendingScore（下一个 Phase 做预取/补偿）。全程在本类的 stateLock 内。
++                    {
++                        final com.azurebranches.command.PhaseSnapshot _expSnap =
++                            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++                        if (_expSnap != null) {
++                            final String _key = com.azurebranches.command.PhaseSnapshot.scoreKey(
++                                objective.getName(), scoreHolder.getScoreboardName());
++                            _expSnap.putScore(_key, newValue, score.value());
++                            _expSnap.markPendingScore(_key);
++                            com.azurebranches.command.ExpChainSupport.onScoreInterceptWrite();
++                        }
++                    }
+                     boolean hasChanged = requiresSync.isTrue();
+                     if (objective.displayAutoUpdate()) {
+                         final Component newDisplay = scoreHolder.getDisplayName();
+@@ -231,8 +244,31 @@ public class Scoreboard {
+     }
+ 
+     public @Nullable ReadOnlyScoreInfo getPlayerScoreInfo(final ScoreHolder name, final Objective objective) {
++        // CeruLean start - EXP5Plus: PhaseSnapshot 计分读拦截（缓存命中 / 读集记录）
++        final com.azurebranches.command.PhaseSnapshot _expSnap =
++            com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
+         PlayerScores playerScore = this.playerScores.get(name.getScoreboardName());
+-        return playerScore != null ? playerScore.get(objective) : null;
++        final ReadOnlyScoreInfo _info = playerScore != null ? playerScore.get(objective) : null;
++        if (_expSnap != null) {
++            final String _key = com.azurebranches.command.PhaseSnapshot.scoreKey(
++                objective.getName(), name.getScoreboardName());
++            final Integer _cached = _expSnap.getCachedScore(_key);
++            if (_cached != null) {
++                com.azurebranches.command.ExpChainSupport.onScoreInterceptCacheHit();
++                final int _value = _cached;
++                return new ReadOnlyScoreInfo() {
++                    @Override public int value() { return _value; }
++                    @Override public boolean isLocked() { return false; }
++                    @Override public net.minecraft.network.chat.numbers.NumberFormat numberFormat() { return null; }
++                };
++            }
++            if (_info != null) {
++                _expSnap.recordScoreRead(_key, _info.value(), _expSnap.getSnapshotTick());
++                com.azurebranches.command.ExpChainSupport.onScoreInterceptRead();
++            }
++        }
++        return _info;
++        // CeruLean end - EXP5Plus score read interception
+     }
+ 
+     public Collection<PlayerScoreEntry> listPlayerScores(final Objective objective) {
+@@ -262,6 +298,23 @@ public class Scoreboard {
+         final boolean notify;
+         this.stateLock.lock();
+         try {
++            // CeruLean EXP5Plus: 移除前捕获旧值，供 OCC 回滚
++            {
++                final com.azurebranches.command.PhaseSnapshot _expSnap =
++                    com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++                if (_expSnap != null) {
++                    final PlayerScores _existing = this.playerScores.get(player.getScoreboardName());
++                    if (_existing != null) {
++                        _existing.listRawScores().forEach((objective, score) -> {
++                            final String _key = com.azurebranches.command.PhaseSnapshot.scoreKey(
++                                objective.getName(), player.getScoreboardName());
++                            _expSnap.putScore(_key, 0, score.value());
++                            _expSnap.markPendingScore(_key);
++                            com.azurebranches.command.ExpChainSupport.onScoreInterceptWrite();
++                        });
++                    }
++                }
++            }
+             notify = this.playerScores.remove(player.getScoreboardName()) != null;
+         } finally {
+             this.stateLock.unlock();
+@@ -278,6 +331,21 @@ public class Scoreboard {
+         try {
+             PlayerScores scores = this.playerScores.get(player.getScoreboardName());
+             if (scores != null) {
++                // CeruLean EXP5Plus: 移除前捕获旧值，供 OCC 回滚
++                {
++                    final com.azurebranches.command.PhaseSnapshot _expSnap =
++                        com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++                    if (_expSnap != null) {
++                        final Score _existing = scores.get(objective);
++                        if (_existing != null) {
++                            final String _key = com.azurebranches.command.PhaseSnapshot.scoreKey(
++                                objective.getName(), player.getScoreboardName());
++                            _expSnap.putScore(_key, 0, _existing.value());
++                            _expSnap.markPendingScore(_key);
++                            com.azurebranches.command.ExpChainSupport.onScoreInterceptWrite();
++                        }
++                    }
++                }
+                 boolean hasRemoved = scores.remove(objective);
+                 if (!scores.hasScores()) {
+                     removedPlayer = this.playerScores.remove(player.getScoreboardName()) != null;

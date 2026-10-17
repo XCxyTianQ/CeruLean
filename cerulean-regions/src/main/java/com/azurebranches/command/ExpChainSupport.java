@@ -396,6 +396,7 @@ public final class ExpChainSupport {
     // EXP4: Data pool interception statistics
     private static final AtomicLong dataInterceptBlockWrites = new AtomicLong();
     private static final AtomicLong dataInterceptBlockReads = new AtomicLong();
+    private static final AtomicLong blockReadsRecorded = new AtomicLong();
 
     // EXP4: Scoreboard compensation statistics
     private static final AtomicLong scoreCompensations = new AtomicLong();
@@ -437,6 +438,17 @@ public final class ExpChainSupport {
 
     /** EXP4: Record a block read intercepted at the data pool level. */
     public static void onDataInterceptBlockRead() { dataInterceptBlockReads.incrementAndGet(); }
+
+    /**
+     * CeruLean: 每次 `Level.getBlockState` 真的把读数记进 PhaseSnapshot 读集时 +1。
+     *
+     * <p>与 {@link #onDataInterceptBlockRead()}（**缓存命中**才 +1）不同：这个计数回答的是
+     * "OCC 的方块读集到底有没有被填过"——为空的话 PhaseValidator 只是在空集上通过，
+     * 等于 OCC 没生效。它是 EXP3 是否真正接线的唯一直接证据。</p>
+     */
+    public static void onBlockReadRecorded() { blockReadsRecorded.incrementAndGet(); }
+
+    public static long blockReadRecordedCount() { return blockReadsRecorded.get(); }
 
     /** EXP5Plus: Record a score write intercepted at the data pool level. */
     public static void onScoreInterceptWrite() { scoreInterceptWrites.incrementAndGet(); }

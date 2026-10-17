@@ -80,6 +80,21 @@ public final class CeruLeanCommand {
         out.append('\n').append("  批上限 ").append(com.azurebranches.command.ExpChainSupport.maxBatchSize())
             .append(" / 远程超时 ").append(com.azurebranches.command.ExpChainSupport.remoteTimeoutMs()).append("ms");
         out.append('\n').append("  命令方块失败收容 ").append(com.azurebranches.command.CommandBlockSupport.containedFailureCount());
+        // OCC（EXP3+）：读集校验与回滚重试的实况 —— 这是"OCC 真的在工作"的唯一可观测面
+        out.append('\n').append("  OCC 校验：通过 ").append(com.azurebranches.command.ExpChainSupport.validationPassedCount())
+            .append(" / 重试 ").append(com.azurebranches.command.ExpChainSupport.validationRetryCount())
+            .append(" / 耗尽 ").append(com.azurebranches.command.ExpChainSupport.validationExhaustedCount())
+            .append(" / 冲突率 ").append(String.format(java.util.Locale.ROOT, "%.2f",
+                com.azurebranches.command.ExpChainSupport.validationConflictRatio()));
+        // 数据面拦截计数：证明 Level/Scoreboard 的钩子确实被走到（否则读集恒空）
+        out.append('\n').append("  数据面：方块读 ").append(com.azurebranches.command.ExpChainSupport.dataInterceptBlockReadCount())
+            .append(" / 计分读 ").append(com.azurebranches.command.ExpChainSupport.scoreInterceptReadCount())
+            .append(" / 计分写 ").append(com.azurebranches.command.ExpChainSupport.scoreInterceptWriteCount())
+            .append(" / 计分缓存命中 ").append(com.azurebranches.command.ExpChainSupport.scoreInterceptCacheHitCount())
+            .append(" / 读集记录 ").append(com.azurebranches.command.ExpChainSupport.blockReadRecordedCount());
+        out.append('\n').append("  补偿：计分 ").append(com.azurebranches.command.ExpChainSupport.scoreCompensationCount())
+            .append(" / 失败 ").append(com.azurebranches.command.ExpChainSupport.scoreCompensationFailureCount())
+            .append(" / NBT ").append(com.azurebranches.command.ExpChainSupport.nbtCompensationCount());
         context.getSource().getSender().sendMessage(Component.text(out.toString()));
         return 1;
     }
