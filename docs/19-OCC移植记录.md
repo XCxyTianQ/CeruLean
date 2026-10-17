@@ -75,6 +75,21 @@ OCC 校验 · 链尾读集校验真的跑过（validationPassed ≥ 1）      �
 **副作用（正向）**：`挂起/恢复` 从 `0/0` 变成 **`2/2`**。EXP6Plus 的 chain-future 屏障让链
 在批边界真的挂起并恢复；此前单区域环境下 `sameRegion` 恒 true、不产生延迟批次，是死路径。
 
+## 5.1 `command_blocks.exp.validation.*` 开关的运行时验证
+
+目标要求"接好 `command_blocks.exp.validation.*` 配置开关"。代码链路是
+`PhaseValidator.isEnabled()/maxRetries()/maxReadSetSize()` → `AzureBranchesConfig` →
+键 `command_blocks.exp.validation.enabled / max_retries / max_read_set`。
+运行时用两次起服对比确认（`/cerulean exp` 现在会输出 `PhaseValidator.describe()`）：
+
+```
+enabled = true  → EXP3 OCC validation: maxReadSet=128, maxRetries=5 (+ EXP4 score read-set, EXP6 NBT read-set)
+enabled = false → EXP3 validation disabled (config: validation.enabled=false)
+```
+
+注意 `maxReadSet=128 / maxRetries=5` 是**测试配置里特意写的非默认值**（默认 256/3）——
+这证明配置文件真的被读取，而不只是"默认值恰好一致"。
+
 ## 6. 还没做（如实留档）
 
 1. **`/data` 的 NBT 数据域（EXP6 的核心之一）**：需要在 `/data` 的六条流（get/getNumeric/

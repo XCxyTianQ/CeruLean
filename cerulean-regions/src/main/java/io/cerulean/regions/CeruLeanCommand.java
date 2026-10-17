@@ -86,6 +86,9 @@ public final class CeruLeanCommand {
             .append(" / 耗尽 ").append(com.azurebranches.command.ExpChainSupport.validationExhaustedCount())
             .append(" / 冲突率 ").append(String.format(java.util.Locale.ROOT, "%.2f",
                 com.azurebranches.command.ExpChainSupport.validationConflictRatio()));
+        // OCC 开关实况：PhaseValidator.describe() 直接读 command_blocks.exp.validation.*，
+        // 这是"配置真的接上了"的运行时证据（enabled/disabled 一眼可见）。
+        out.append('\n').append("  ").append(com.azurebranches.command.PhaseValidator.describe());
         // 数据面拦截计数：证明 Level/Scoreboard 的钩子确实被走到（否则读集恒空）
         out.append('\n').append("  数据面：方块读 ").append(com.azurebranches.command.ExpChainSupport.dataInterceptBlockReadCount())
             .append(" / 计分读 ").append(com.azurebranches.command.ExpChainSupport.scoreInterceptReadCount())
