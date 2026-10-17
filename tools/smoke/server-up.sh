@@ -45,6 +45,10 @@ cat > "$RUN_DIR/server.properties" <<EOF
 level-name=smoke-world
 level-type=minecraft\:flat
 online-mode=false
+# 冒烟服必须允许离线机器人：Paper 26.3 生成的服务器配置默认 white-list=true，
+# 会让 mineflayer 机器人登录即被踢（"You are not whitelisted"），与插件行为无关。
+white-list=false
+enforce-whitelist=false
 enable-command-block=true
 enable-rcon=true
 rcon.port=$RCON_PORT
