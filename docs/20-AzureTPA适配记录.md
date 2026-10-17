@@ -1,4 +1,4 @@
-# 19 · AzureTPA 在 CeruLean 26.3 上的适配与验收
+# 20 · AzureTPA 在 CeruLean 26.3 上的适配与验收
 
 日期：2026-10-17 · 插件版本：**AzureTPA 1.2.0** · 服务端：本地 paperclip（Folia 26.3-DEV-main@b5fd848）
 
