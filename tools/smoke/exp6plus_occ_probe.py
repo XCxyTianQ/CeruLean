@@ -76,6 +76,10 @@ def clear_area(x):
 
 def fresh_zombie():
     one('kill @e[type=minecraft:zombie]')
+    # ★ 冒险岛环境：冒烟服是超平坦世界，地面在 y≈-61，在 y=64 直接 summon 会**摔死**，
+    # 于是链里 `@e[type=zombie,limit=1]` 解析不到实体（表现为分数写不进去、看起来像 OCC 误判）。
+    # 垫一块落点支撑即可。注意**不能**用 Invulnerable —— C2 需要在相位内把实体打死。
+    one('setblock 4 63 4 minecraft:stone')
     one('summon minecraft:zombie 4 64 4 {NoAI:1b,PersistenceRequired:1b,UUID:[I;1,2,3,4]}')
     one(f'scoreboard players set {UUID} exp6p 0')
 
@@ -109,6 +113,8 @@ for x in (4, 8, 12):
     clear_area(x)
 one('forceload add 0 0')
 one('time set midnight')
+one('gamerule doDaylightCycle false')
+one('weather clear')
 one('kill @e[type=minecraft:zombie]')
 one('scoreboard objectives remove exp6p')
 one('scoreboard objectives add exp6p dummy')
@@ -133,21 +139,15 @@ def cnt(n):
     return lines.count(n)
 
 
-# ⚠ 已知缺口（docs/19 §6）：C1 目前会因为"自写自读"被判成外部冲突而重试耗尽。
-# 判定逻辑见 verifyReadSetAndResume：它应把本 Phase 自己写过的位置/分数键从"外部修改"里排除。
-# 在修掉之前，C1 只作信息输出，不拉红套件。
-_gap = cnt('P1-SET-OK') >= 1 and cnt('P1-COMMIT-KEEP-5') >= 1
-print(f"  [GAP ] C1 三个阶段标记齐全  -> SET-OK={cnt('P1-SET-OK')} COMMIT-KEEP-5={cnt('P1-COMMIT-KEEP-5')} END={cnt('P1-END')}"
-      + ('' if _gap else '（已知缺口：自写自读被判成冲突）'))
+record('C1 三个阶段标记齐全（SET-OK / COMMIT-KEEP-5 / END）',
+       f"SET-OK={cnt('P1-SET-OK')} COMMIT-KEEP-5={cnt('P1-COMMIT-KEEP-5')} END={cnt('P1-END')}",
+       cnt('P1-SET-OK') >= 1 and cnt('P1-COMMIT-KEEP-5') >= 1 and cnt('P1-END') >= 1)
 record('C1 无重放（impulse 只跑一次）', f"PHASE-START={cnt('P1-PHASE-START')}",
        cnt('P1-PHASE-START') == 1)
 c1_after = counters()
 retry_delta = (c1_after.get('retry', 0) - c1_before.get('retry', 0))
-if retry_delta == 0:
-    record('C1 没有发生校验重试', f'retry {c1_before.get("retry")}→{c1_after.get("retry")}', True)
-else:
-    print(f"  [GAP ] C1 没有发生校验重试  -> retry {c1_before.get('retry')}→{c1_after.get('retry')}"
-          f"（已知缺口：自写自读被误判为外部冲突）")
+record('C1 没有发生校验重试（自写自读不再被当成外部冲突）',
+       f'retry {c1_before.get("retry")}→{c1_after.get("retry")}', retry_delta == 0)
 one('setblock 10 64 10 minecraft:air')
 clear_area(4)
 

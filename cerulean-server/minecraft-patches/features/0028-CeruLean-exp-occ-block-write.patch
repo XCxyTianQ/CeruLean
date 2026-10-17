@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sun, 18 Oct 2026 00:21:17 +0800
+Subject: [PATCH] CeruLean EXP OCC: capture block writes and exclude self-writes from validation
+
+---
+修 OCC 的**自写自读误判**：补上"方块写"的数据面，并在校验里排除本 Phase 自己的写。
+
+C1 用例（实体存活 → COMMIT）暴露的问题：链里 `setblock 10 64 10` 会先 `getBlockState`
+把 `(10,64,10)=air` 记进读集，然后**自己**把它写成 stone；链尾 `verifyReadSetAndResume`
+把这处当成"外部修改" ⇒ 误判冲突 ⇒ 重试 3 次耗尽，链的正常语义被打断。
+
+根因不是判定逻辑写错，而是**数据面缺了一块**：`PhaseSnapshot.putBlock/markPendingWrite`
+在整个仓库里**没有任何调用方**（`captureOldState` 也是），即"方块写"从未被登记。于是：
+  * 本 Phase 的写集恒空 ⇒ 排除无从谈起；
+  * EXP4 的回滚基线（oldBlockStates）也恒空 ⇒ 回滚其实没有方块基线。
+
+本补丁两件事：
+
+1) `Level.setBlock` 增加写钩子（EXP 上下文内）：
+     putBlock(pos, new, old) —— 记写前值（回滚基线）+ 把新值放进 Phase 缓存（读己写可见）
+     markPendingWrite(pos)   —— 登记"本 Phase 写过这里"
+     ExpChainSupport.captureOldState(pos, old) —— 跨区域延迟批次在**目标区域线程**执行时
+                                PhaseSnapshot 的 ThreadLocal 不可见，需经 Continuation 带回
+   取旧值时直接问 chunk（不走 getBlockState），避免触发一次假的读集记录。
+
+2) `verifyReadSetAndResume` 的外部检查排除本 Phase 自己的写：
+     方块：`phaseSnap.hasPendingWrite(pos)` ⇒ skip
+     计分：`phaseSnap.hasPendingScore(key)` ⇒ skip
+   （计分侧 `mutate()` 早已 markPendingScore，只是校验没排除。）
+
+实测：`:cerulean-server:compileJava` 零错误。
+---
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index eef318b..bca19b4 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1091,6 +1091,29 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+             return false;
+         }
+ 
++        // CeruLean start - EXP4: 方块写的数据面
++        // 三件事，缺一不可：
++        //   ① putBlock(new, old) —— 记下写前值（OCC 回滚基线）并把新值放进 Phase 缓存（读己写可见）；
++        //   ② markPendingWrite(pos) —— 登记"本 Phase 写过这里"；
++        //   ③ captureOldState(...) —— 跨区域延迟批次在**目标区域线程**上执行时，
++        //      PhaseSnapshot 的 ThreadLocal 不可见，需经 Continuation 携带的 capture 映射带回。
++        // ②也是正确性修复：链自己读过又自己写过的位置，链尾校验时不能被判成"外部修改"，
++        // 否则会无谓重试（C1 用例暴露的误判）。
++        {
++            final com.azurebranches.command.PhaseSnapshot _expSnap =
++                com.azurebranches.command.ExpChainSupport.getPhaseSnapshot();
++            if (_expSnap != null) {
++                final long _posLong = pos.asLong();
++                // 直接问 chunk，避免走 getBlockState 触发一次假的读集记录
++                final BlockState _oldState =
++                    this.getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.FULL, true).getBlockState(pos);
++                _expSnap.putBlock(_posLong, blockState, _oldState);
++                _expSnap.markPendingWrite(_posLong);
++                com.azurebranches.command.ExpChainSupport.captureOldState(_posLong, _oldState);
++            }
++        }
++        // CeruLean end - EXP4 block write pool
++
+         if (!this.isClientSide() && this.isDebug()) {
+             return false;
+         }
+diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
+index c5e709a..b47f456 100644
+--- a/net/minecraft/world/level/block/CommandBlock.java
++++ b/net/minecraft/world/level/block/CommandBlock.java
+@@ -902,6 +902,10 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+             new java.util.ArrayList<>(readValues != null ? readValues.size() : 0);
+         if (hasBlockReads) {
+             for (final java.util.Map.Entry<Long, Object> entry : readValues.entrySet()) {
++                // CeruLean: 本 Phase 自己写过的位置不是"外部修改"（自写自读不算冲突）
++                if (phaseSnap.hasPendingWrite(entry.getKey())) {
++                    continue;
++                }
+                 final BlockPos checkPos = BlockPos.of(entry.getKey());
+                 final Object expected = entry.getValue();
+                 final java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
+@@ -924,6 +928,10 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+         if (hasScoreReads) {
+             for (final java.util.Map.Entry<String, Integer> entry : scoreReadValues.entrySet()) {
+                 final String key = entry.getKey();
++                // CeruLean: 本 Phase 自己写过的分数键不是"外部修改"
++                if (phaseSnap.hasPendingScore(key)) {
++                    continue;
++                }
+                 final int expected = entry.getValue();
+                 final int colon = key.indexOf(':');
+                 if (colon < 0) {

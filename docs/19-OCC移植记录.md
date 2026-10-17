@@ -117,6 +117,37 @@ enabled = false → EXP3 validation disabled (config: validation.enabled=false)
    （实测值 33、`计分写 1`）。所以 `EntitySelector` 跨区域补丁与本主题无关。
 2. **`execute if entity @e[...]` 未触发 ≠ 选择器坏**：同上，实体已死。
 
+## 5.3 C1 的排查进展（未结案）
+
+C1（实体存活 → COMMIT）仍然失败：`retry 0→3`、`SET-OK=0`。本轮排掉了两个环境问题、补了一处真实缺失，
+但**根因尚未定位**，如实记录到这里。
+
+### 已排除
+
+1. **方块"自写自读"误判**：确实是缺失 —— `PhaseSnapshot.putBlock/markPendingWrite/captureOldState`
+   全仓库**无调用方**（方块写的数据面从未接线，连 EXP4 回滚基线也是空的）。已补（`0028`）：
+   `Level.setBlock` 记旧值 + 登记 pendingWrite + captureOldState，并在
+   `verifyReadSetAndResume` 里排除 `hasPendingWrite/hasPendingScore` 的位置与分数键。
+   **但 C1 结果不变** ⇒ 这不是 C1 的主因（不过这处修复本身是必需的，保留）。
+2. **实体被环境杀死**：冒烟服是**超平坦**世界，地面在 y≈-61，在 y=64 直接 `summon` 的僵尸会**摔死**，
+   于是链里 `@e[type=zombie,limit=1]` 解析不到实体，表现为"分数写不进去"。已补落点支撑
+   （`setblock 4 63 4 stone`）。**但 C1 仍失败** ⇒ 也不是主因。
+
+### 已定位到的确切事实
+
+- `重试` 计数只由 `CommandBlock.java:1054` 的 `case RETRY ->` 递增（全仓仅此一处调用
+  `onValidationRetry`）⇒ `PhaseValidator.validate(...)` **确实返回了 RETRY**；
+- 但给 `PhaseValidator` 的 4 个"外部检查"分支都加了 `System.err` 诊断后，**一条都没打印**；
+- `PhaseValidator` 里有 **4 个 `validate` 重载**（不委托关系待确认），返回 RETRY 的语句共 7 处，
+  我只插桩了 4 处 ⇒ **RETRY 出自未插桩的那几处**（很可能在 6 参重载 `validate(...)` 自己的分支里）。
+
+### 下一步（下一轮第一件事）
+
+把 `PhaseValidator` 的**全部** `return ValidationResult.RETRY;` 站点插桩（或在 6 参重载入口
+打印 `retryCount/readSet.size()/各 modified map 是否含 TRUE`），复跑
+`tools/smoke/exp6plus_occ_probe.py` 单独用例，直接读出是哪个分支判定冲突。
+拿到分支名后再决定是"排除条件不够"还是"该检查本身有 bug"。
+
 ## 6. 还没做（如实留档）
 
 1. **`/data` 的 NBT 数据域（EXP6 的核心之一）**：需要在 `/data` 的六条流（get/getNumeric/

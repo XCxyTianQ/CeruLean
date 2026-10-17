@@ -233,7 +233,8 @@ public final class PhaseValidator {
                 if (Boolean.TRUE.equals(externallyModified)) {
                     // This position was modified externally between the read
                     // and now → our read is stale → Phase must retry
-                    return ValidationResult.RETRY;
+                    System.err.println("[CeruLean] EXP3 conflict: CHECK_READ_SET");
+                    return ValidationResult.RETRY;return ValidationResult.RETRY;
                 }
             }
         }
@@ -248,7 +249,8 @@ public final class PhaseValidator {
                     if (Boolean.TRUE.equals(externallyModified)) {
                         // This score key was modified externally between the read
                         // and now → our read is stale → Phase must retry
-                        return ValidationResult.RETRY;
+                        System.err.println("[CeruLean] EXP3 conflict: CHECK_SCORE_READ_SET");
+                        return ValidationResult.RETRY;return ValidationResult.RETRY;
                     }
                 }
             }
@@ -264,7 +266,8 @@ public final class PhaseValidator {
                     if (Boolean.TRUE.equals(externallyModified)) {
                         // This NBT key was modified externally between the read
                         // and now → our read is stale → Phase must retry
-                        return ValidationResult.RETRY;
+                        System.err.println("[CeruLean] EXP3 conflict: CHECK_NBT_READ_SET");
+                        return ValidationResult.RETRY;return ValidationResult.RETRY;
                     }
                 }
             }
@@ -281,6 +284,7 @@ public final class PhaseValidator {
                         // The entity resolved by a scoreboard holder argument
                         // vanished between resolution and now → our holder set
                         // is stale → Phase must retry
+                        System.err.println("[CeruLean] EXP3 conflict: CHECK_ENTITY_READ_SET id=" + entityId);
                         return ValidationResult.RETRY;
                     }
                 }
