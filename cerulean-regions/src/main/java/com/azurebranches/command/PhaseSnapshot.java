@@ -98,6 +98,13 @@ public final class PhaseSnapshot {
 
     /** Pre-write NBT values for rollback compensation. */
     private final Map<String, Object> nbtOldValues;
+    /**
+     * CeruLean: 本 Phase **写过**的 NBT 键（与 {@code pendingWritePositions} / {@code pendingScoreKeys} 对称）。
+     *
+     * <p>用途：链尾 OCC 校验时必须把"自己写过的键"从"外部修改"里排除，否则
+     * `/data get` 之后再 `/data merge` 同一路径会被误判成非可重复读 ⇒ 无谓重试。</p>
+     */
+    private final java.util.Set<String> pendingNbtKeys;
 
     /** NBT read-set for OCC validation: composite-key → tick. */
     private final Map<String, Long> nbtReadSet;
@@ -196,6 +203,7 @@ public final class PhaseSnapshot {
         this.scoreReadSetValues = new HashMap<>();
         this.nbtCache = new ConcurrentHashMap<>();
         this.nbtOldValues = new ConcurrentHashMap<>();
+        this.pendingNbtKeys = java.util.concurrent.ConcurrentHashMap.newKeySet();
         this.nbtReadSet = new ConcurrentHashMap<>();
         this.nbtReadSetValues = new ConcurrentHashMap<>();
         this.entityReadSet = new ConcurrentHashMap<>();
@@ -441,6 +449,12 @@ public final class PhaseSnapshot {
         if (oldVal != null) {
             nbtOldValues.putIfAbsent(key, oldVal);
         }
+        pendingNbtKeys.add(key); // CeruLean: 登记"本 Phase 写过这个 NBT 键"
+    }
+
+    /** CeruLean: 本 Phase 是否写过这个 NBT 键（校验时据此排除"自写自读"）。 */
+    public boolean hasPendingNbt(final String key) {
+        return pendingNbtKeys.contains(key);
     }
 
     /** Get the pre-write (old) NBT value for a key. */
@@ -725,6 +739,7 @@ public final class PhaseSnapshot {
         scoreReadSet.clear();
         scoreReadSetValues.clear();
         nbtCache.clear();
+        pendingNbtKeys.clear();
         nbtReadSet.clear();
         nbtReadSetValues.clear();
         entityReadSet.clear();

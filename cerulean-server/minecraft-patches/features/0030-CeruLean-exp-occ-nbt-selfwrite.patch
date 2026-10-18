@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sun, 18 Oct 2026 11:41:09 +0800
+Subject: [PATCH] CeruLean EXP OCC: exclude self-written NBT keys from validation
+
+---
+补齐 NBT 域的"自写自读"排除（与 `0028` 的方块/计分对称）。
+
+`0028` 修的是方块与计分：链自己读过又自己写过的位置/分数键，不能在链尾校验时被当成
+"外部修改"，否则无谓重试。**NBT 域漏了同一处理**：
+
+  * `EntityLayer.interceptWrite(...)` → `PhaseSnapshot.putNbt(key, new, old)` 只记旧值，
+    没有"本 Phase 写过这个键"的登记；
+  * `verifyReadSetAndResume` 的 NBT 循环对读集里每个键都去 live 实体上比对，
+    于是 `/data get entity ... <path>` 之后再 `/data merge entity ... <path>` 会被误判成
+    "非可重复读" ⇒ RETRY。
+
+本补丁：
+  1. `PhaseSnapshot` 新增 `pendingNbtKeys`（`putNbt` 内部登记）与 `hasPendingNbt(key)`，
+     `resetForRetry` 时随其它集合一起清空；
+  2. `verifyReadSetAndResume` 的 NBT 循环跳过 `hasPendingNbt` 的键。
+
+至此三个数据域（方块 / 计分 / NBT）对"自写自读"的处理完全一致。
+
+实测：`:cerulean-server:compileJava` 零错误。
+---
+diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
+index 4473f69..cc79437 100644
+--- a/net/minecraft/world/level/block/CommandBlock.java
++++ b/net/minecraft/world/level/block/CommandBlock.java
+@@ -977,6 +977,10 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+             final java.util.Map<Integer, java.util.List<java.util.Map.Entry<String, Object>>> nbtByEntity =
+                 new java.util.HashMap<>();
+             for (final java.util.Map.Entry<String, Object> entry : nbtReadValues.entrySet()) {
++                // CeruLean: 本 Phase 自己写过的 NBT 键不是"外部修改"（与方块/计分对称）
++                if (phaseSnap.hasPendingNbt(entry.getKey())) {
++                    continue;
++                }
+                 final int colon = entry.getKey().indexOf(':');
+                 if (colon < 0) {
+                     continue;

@@ -56,6 +56,11 @@ AzureBranches 的 EXP 实现**不在补丁里**，而在 `folia-server/build.gra
 | 计分写 | `Scoreboard.mutate()` 锁内 | 写前 `putScore(key, newValue, 旧值)` + `markPendingScore`（供回滚） |
 | 计分删 | `resetAllPlayerScores` / `resetSinglePlayerScore` 锁内 | 移除前捕获旧值 |
 | 实体（EXP6Plus） | `ScoreHolderArgument.getNames` | 实体型 holder 逐个 `recordEntityRead`（防幽灵读、跳过已死亡 holder） |
+| NBT 写（EXP6） | `/data` 六条流（`0027`） | 写前值 + `putNbt`（`0030` 起同时登记 `pendingNbtKeys`） |
+| 方块写（EXP4） | `Level.setBlock`（`0028`） | `putBlock` + `markPendingWrite` + `captureOldState` |
+
+**三个数据域对"自写自读"的处理已经一致**：校验时分别按 `hasPendingWrite` / `hasPendingScore` /
+`hasPendingNbt` 跳过本 Phase 自己写过的位置/键（`0028` + `0030`）。
 
 ## 5. 验收：怎么证明 OCC 真的在跑
 
@@ -100,9 +105,10 @@ enabled = false → EXP3 validation disabled (config: validation.enabled=false)
 |---|---|---|
 | **C2** 实体在挂起期间死亡 → RETRY | ✅ | `retry 3→4 (Δ1)`，`PHASE-START=1`（重放的是 Phase 不是头块） |
 | **C3** 幽灵分数防护 | ✅ | `NO-ENTRY=1`、`GHOST-5=0`、`GHOST-7=0` |
-| **C1** 实体存活 → COMMIT | ⚠️ **已知缺口** | 出现 `retry Δ3`（耗尽）⇒ `P1-SET-OK`/`P1-COMMIT-KEEP-5` 缺失 |
+| **C1** 实体存活 → COMMIT | ✅ | `SET-OK=1`、`COMMIT-KEEP-5=1`、`END=1`、`retry Δ0` |
+| **C4** NBT 域自写自读（本仓库新增） | ✅ | `/data get` → `/data merge` 同一路径后 `retry Δ0`（`0030`） |
 
-**C1 的根因（已定位，未修）**：链里 `setblock 10 64 10` 会先 `getBlockState` 把
+**C1 的根因（已定位并修掉，见 §5.2）**：链里 `setblock 10 64 10` 会先 `getBlockState` 把
 `(10,64,10)=air` 记进读集，然后自己把它写成 stone；链尾校验时
 `verifyReadSetAndResume` 把这处"自己写的"当成**外部修改** ⇒ 误判冲突 ⇒ 重试 3 次耗尽。
 修法：外部检查阶段必须把本 Phase 自己写过的位置 / 分数键（`pendingWritePositions` /

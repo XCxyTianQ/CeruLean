@@ -160,6 +160,29 @@ record('C1 没有发生校验重试（自写自读不再被当成外部冲突）
 one('setblock 10 64 10 minecraft:air')
 clear_area(4)
 
+# ═══════════ C4：NBT 域"自写自读"不得误判（与 C1 的方块/计分对称）═══════════
+# /data get 把某个 NBT 路径记进读集，随后 /data merge 写同一路径 ⇒ 校验时必须排除自写键，
+# 否则会被当成"非可重复读"而无谓重试（0028 修了方块/计分，0030 补 NBT）。
+clear_area(4)
+set_impulse(4, 4, 'say P4-PHASE-START')
+set_chain(4, 3, f'data get entity {Z} CustomNameVisible')
+set_chain(4, 2, f'data merge entity {Z} {{CustomNameVisible:1b}}')
+set_chain(4, 1, 'setblock 10 64 10 minecraft:stone')
+set_chain(4, 0, 'say P4-END')
+fresh_zombie()
+time.sleep(1)
+c4_before = counters()
+fire(4, 12)
+lines = log_tail(marker)
+record('C4 NBT 域 · 链路走完（/data get → /data merge → 校验）',
+       f"P4-END={lines.count('P4-END')}", lines.count('P4-END') >= 1)
+c4_after = counters()
+record('C4 NBT 域 · 自写自读不被误判（无重试）',
+       f'retry {c4_before.get("retry")}→{c4_after.get("retry")}',
+       (c4_after.get('retry', 0) - c4_before.get('retry', 0)) == 0)
+one('setblock 10 64 10 minecraft:air')
+clear_area(4)
+
 # ═══════════ C2：实体在挂起期间死亡 → RETRY ═══════════
 clear_area(8)
 set_impulse(8, 4, 'say P2-PHASE-START')
