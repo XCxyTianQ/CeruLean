@@ -45,6 +45,7 @@ L2_LIVE = [
 L2_SELF = [
     ('L2 T4 EXP 链（SAFE+EXP 两轮起服）', ['tools/smoke/exp_chain_acceptance.py', JAR, './smoke-exp']),
     ('L2 R1 存档往返', ['tools/smoke/scoreboard_persist_check.py', JAR, './smoke-persist']),
+    ('L2 区域化命令（矩阵 + 混合压力）', ['tools/smoke/command_acceptance.py', JAR, './smoke-cmd']),
 ]
 
 results = []
