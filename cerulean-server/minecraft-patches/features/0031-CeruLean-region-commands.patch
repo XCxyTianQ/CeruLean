@@ -1,0 +1,239 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sun, 18 Oct 2026 14:17:26 +0800
+Subject: [PATCH] CeruLean: region-safe command coverage (tag/team/teammsg/trigger/function/loot)
+
+---
+区域化命令覆盖层（实测驱动，不照搬 26.1.2 整文件）。
+
+**做法**：先只恢复注册，再用 `tools/smoke/region_commands_probe.py` 在**两种上下文**
+（RCON=全局区域线程 / 链内=目标区域线程）逐条实测，只补**真的坏了**的那几条。
+这样避免了直接覆盖 upstream 那 17 个 26.1.2 快照文件（漂移面大且不可控）。
+
+恢复的命令（实测正常，无需改动）：
+  /function   函数执行本身不需要区域跳转
+  /tag        RCON 与链内都正常（实体访问在区域线程上就地完成）
+  /team       RCON 与链内都正常（队伍数据在 Scoreboard 的 stateLock 下，见 0022）
+  /teammsg    同上
+  /trigger    积分板访问走 Scoreboard 的锁
+  /loot       见下（需要一处区域派发修复）
+
+修复（实测发现的真故障）：
+
+1) `/loot spawn` —— 在全局区域线程上 `ServerLevel.addFreshEntity` → `addEntity` 取
+   `getCurrentWorldData()` 为 null ⇒ NPE。改为在**目标位置所属区域**执行掉落物生成。
+   容器写入路径（`blockDistribute`）同理一并包上。
+   注：这里用的是 `RegionCommandExecutor` 的**阻塞版** `onBlock`，从全局线程调用会打印
+   "blocking a tick/region thread" 性能告警 —— upstream 的 LootCommand 覆盖层同样用阻塞版，
+   属已知降级路径；链内同区域时会内联，不触发。
+
+2) `MinecraftServer.reloadResources` 末尾的 `if (isSameThread()) managedBlock(...)`：
+   全局 tick 线程上阻塞在 Folia 是非法的，实测会**直接把全局区域 tick 打死并关服**
+   （不是命令报错，是整服停摆）。加守卫：tick 线程上不阻塞、异步返回。
+
+暂缓（实测后判定不适合本轮做，宁可不注册也不留一条会炸的命令）：
+
+3) `/reload`、`/datapack`：把 `reloadResources` 派发到全局 tick 之后，资源重载内部
+   `SimpleReloadInstance` 用 `wait()` 等待，在 tick 线程上直接抛 UnsupportedOperationException
+   （即使有上面的守卫也拿不到成功）。正解是"在非 tick 线程跑重载、只把全局状态变更放回
+   全局 tick"，需要改 `SimpleReloadInstance` 的等待方式 —— 与本轮主题无关，故保留 Folia 默认
+   （不注册），并把原因写进代码注释。
+
+4) `/spreadplayers`：实测在控制台炸两处 —— `Level.getBlockState → getCurrentWorldData() NPE`
+   与 `Entity.teleport → "Must use teleportAsync while in region threading"`。
+   正解要把整条命令改成 async 传送 + 逐位置区域派发（upstream 是 378 行整文件覆盖），
+   同样留作后续。
+
+实测：`region_commands_probe.py` 11 通过 / 0 失败（3 条暂缓项计入 SKIP）；
+`command_stress_probe.py` 8 轮 × 4 条链混合压测 4 通过 / 0 失败，0 未捕获异常。
+---
+diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
+index 223a0d7..71dc5f4 100644
+--- a/net/minecraft/commands/Commands.java
++++ b/net/minecraft/commands/Commands.java
+@@ -213,7 +213,9 @@ public class Commands {
+         // 注意：scoreboard / clone 现由 0015/0016 做区域安全化后放开。
+         DataCommands.register(this.dispatcher, context);
+         // CeruLean end - re-enable data command
+-        //DataPackCommand.register(this.dispatcher, context); // Folia - region threading - TODO
++        //DataPackCommand.register(this.dispatcher, context); // CeruLean - 暂不恢复：见 0031 说明
++        // /datapack enable|disable 会触发资源重载，而 SimpleReloadInstance 内部用 wait()，
++        // 在 tick 线程上直接抛 UnsupportedOperationException（实测 /reload 即此路径）。
+         //DebugCommand.register(this.dispatcher); // Folia - region threading - TODO
+         DefaultGameModeCommands.register(this.dispatcher);
+         //DialogCommand.register(this.dispatcher, context); // Folia - region threading - TODO
+@@ -225,7 +227,7 @@ public class Commands {
+         FillCommand.register(this.dispatcher, context);
+         FillBiomeCommand.register(this.dispatcher, context);
+         ForceLoadCommand.register(this.dispatcher);
+-        //FunctionCommand.register(this.dispatcher); // Folia - region threading - TODO
++        FunctionCommand.register(this.dispatcher); // CeruLean - 重新启用 function（函数执行本身不需要区域跳转）
+         GameModeCommand.register(this.dispatcher);
+         GameRuleCommand.register(this.dispatcher, context);
+         GiveCommand.register(this.dispatcher, context);
+@@ -235,7 +237,7 @@ public class Commands {
+         KillCommand.register(this.dispatcher);
+         ListPlayersCommand.register(this.dispatcher);
+         LocateCommand.register(this.dispatcher, context);
+-        //LootCommand.register(this.dispatcher, context); // Folia - region threading - TODO later
++        LootCommand.register(this.dispatcher, context); // CeruLean - 重新启用 loot（方块/实体访问走属主区域，见 0031）
+         MsgCommand.register(this.dispatcher);
+         SwingCommand.register(this.dispatcher);
+         ParticleCommand.register(this.dispatcher, context);
+@@ -243,7 +245,10 @@ public class Commands {
+         PlaySoundCommand.register(this.dispatcher);
+         PostEffectCommand.register(this.dispatcher);
+         RandomCommand.register(this.dispatcher);
+-        //ReloadCommand.register(this.dispatcher); // Folia - region threading
++        //ReloadCommand.register(this.dispatcher); // CeruLean - 暂不恢复：见 0031 说明
++        // 实测：把 reloadResources 派发到全局 tick 后，资源重载内部 SimpleReloadInstance.wait()
++        // 在 tick 线程上非法 → CompletionException；即使不阻塞（见 MinecraftServer 的守卫）也拿不到成功。
++        // 正解：在**非 tick 线程**上跑重载，只把全局状态变更放回全局 tick（需改 SimpleReloadInstance 的等待方式）。
+         RecipeCommand.register(this.dispatcher);
+         FetchProfileCommand.register(this.dispatcher);
+         //ReturnCommand.register(this.dispatcher); // Folia - region threading
+@@ -263,20 +268,24 @@ public class Commands {
+         SetSpawnCommand.register(this.dispatcher);
+         SetWorldSpawnCommand.register(this.dispatcher);
+         //SpectateCommand.register(this.dispatcher); // Folia - region threading - TODO later
+-        //SpreadPlayersCommand.register(this.dispatcher); // Folia - region threading - TODO later
++        //SpreadPlayersCommand.register(this.dispatcher); // CeruLean - 暂不恢复：见 0031 说明
++        // 实测 /spreadplayers 在控制台（全局区域线程）会炸两处：
++        //   Level.getBlockState → getCurrentWorldData() NPE；Entity.teleport → "Must use teleportAsync"。
++        // 正解是把整条命令改成 async 传送 + 逐位置区域派发（upstream 是 378 行整文件覆盖），
++        // 与 EXP 链语义无关，故留作后续工作而不是给一条必 NPE 的命令。
+         StopSoundCommand.register(this.dispatcher);
+         StopwatchCommand.register(this.dispatcher);
+         SummonCommand.register(this.dispatcher, context);
+-        //TagCommand.register(this.dispatcher); // Folia - region threading - TODO later
+-        //TeamCommand.register(this.dispatcher, context); // Folia - region threading - TODO later
+-        //TeamMsgCommand.register(this.dispatcher); // Folia - region threading - TODO later
++        TagCommand.register(this.dispatcher); // CeruLean - 重新启用 tag（实体访问走属主区域，见 0031）
++        TeamCommand.register(this.dispatcher, context); // CeruLean - 重新启用 team（队伍数据在 Scoreboard.stateLock 下，见 0031）
++        TeamMsgCommand.register(this.dispatcher); // CeruLean - 重新启用 teammsg（同上）
+         TeleportCommand.register(this.dispatcher);
+         TellRawCommand.register(this.dispatcher, context);
+         //TestCommand.register(this.dispatcher, context); // Folia - region threading
+         //TickCommand.register(this.dispatcher); // Folia - region threading - TODO later
+         TimeCommand.register(this.dispatcher, context);
+         TitleCommand.register(this.dispatcher, context);
+-        //TriggerCommand.register(this.dispatcher); // Folia - region threading - TODO later
++        TriggerCommand.register(this.dispatcher); // CeruLean - 重新启用 trigger（玩家区域线程上执行，见 0031）
+         //WaypointCommand.register(this.dispatcher, context); // Folia - region threading - TODO later
+         WeatherCommand.register(this.dispatcher);
+         WorldBorderCommand.register(this.dispatcher);
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 4d20afb..48f7eb2 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -2429,7 +2429,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+                     .filter(Objects::nonNull)
+                     .flatMap(Pack::open)
+                     .collect(ImmutableList.toImmutableList()),
+-                this
++                this.executor
+             )
+             .thenCompose(
+                 packsToLoad -> {
+@@ -2453,7 +2453,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+                         .thenApply(managers -> new MinecraftServer.ReloadableResources(resources, managers));
+                 }
+             )
+-            .thenAcceptAsync(newResources -> {
++            .thenCompose(newResources -> this.runOnGlobalTick(() -> {
+                 io.papermc.paper.command.brigadier.PaperBrigadier.moveBukkitCommands(this.resources.managers().getCommands(), newResources.managers().getCommands()); // Paper
+                 this.resources.close();
+                 this.resources = newResources;
+@@ -2483,14 +2483,34 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+                 this.server.syncCommands(); // Refresh commands after event
+                 // Paper end
+                 new io.papermc.paper.event.server.ServerResourcesReloadedEvent(cause).callEvent(); // Paper - Add ServerResourcesReloadedEvent; fire after everything has been reloaded
+-            }, this);
+-        if (this.isSameThread()) {
++            }));
++        // CeruLean: 在 tick 线程（全局区域线程）上**不得阻塞** —— Folia 的 managedBlock 会抛
++        // UnsupportedOperationException，进而把整个全局区域 tick 打死（实测会导致关服）。
++        // 上游那段变换已经把"应用到全局状态"的部分改成 runOnGlobalTick 异步完成，
++        // 所以这里对 tick 线程直接异步返回；命令反馈由 ReloadCommand 自行处理。
++        if (this.isSameThread() && !ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
+             this.managedBlock(result::isDone);
+         }
+ 
+         return result;
+     }
+ 
++    // AzureBranches EXP5 P1: run a task on the global tick thread and
++    // expose it as a CompletableFuture, so reloadResources applies global
++    // state changes on the main thread (Folia removed the server executor).
++    private CompletableFuture<Void> runOnGlobalTick(final Runnable task) {
++        final CompletableFuture<Void> future = new CompletableFuture<>();
++        io.papermc.paper.threadedregions.RegionizedServer.getInstance().addTask(() -> {
++            try {
++                task.run();
++                future.complete(null);
++            } catch (final Throwable t) {
++                future.completeExceptionally(t);
++            }
++        });
++        return future;
++    }
++
+     public static WorldDataConfiguration configurePackRepository(
+         final PackRepository packRepository, final WorldDataConfiguration initialDataConfig, final boolean initMode, final boolean safeMode
+     ) {
+diff --git a/net/minecraft/server/commands/LootCommand.java b/net/minecraft/server/commands/LootCommand.java
+index d8797a5..7987d12 100644
+--- a/net/minecraft/server/commands/LootCommand.java
++++ b/net/minecraft/server/commands/LootCommand.java
+@@ -271,14 +271,17 @@ public class LootCommand {
+     private static void blockDistribute(
+         final CommandSourceStack source, final BlockPos pos, final List<ItemStack> drops, final CommandResponseTracker<ItemStack> usedItems
+     ) throws CommandSyntaxException {
+-        Container container = BlockItemAccessor.getContainer(source, pos, ItemCommands.ERROR_TARGET_NOT_A_CONTAINER);
+-
+-        for (ItemStack drop : drops) {
+-            if (distributeToContainer(container, drop.copy())) {
+-                container.setChanged();
+-                usedItems.track(drop);
++        // CeruLean: 容器是**方块实体**，读写必须在该方块所属区域线程上进行（同类问题：容器写入）。
++        RegionCommandExecutor.onBlock(source.getLevel(), pos, () -> {
++            Container container = BlockItemAccessor.getContainer(source, pos, ItemCommands.ERROR_TARGET_NOT_A_CONTAINER);
++            for (ItemStack drop : drops) {
++                if (distributeToContainer(container, drop.copy())) {
++                    container.setChanged();
++                    usedItems.track(drop);
++                }
+             }
+-        }
++            return null;
++        });
+     }
+ 
+     private static boolean distributeToContainer(final Container container, final ItemStack itemStack) {
+@@ -375,13 +378,19 @@ public class LootCommand {
+ 
+     private static void dropInWorld(
+         final CommandSourceStack source, final Vec3 pos, final List<ItemStack> drops, final CommandResponseTracker<ItemStack> usedItems
+-    ) {
+-        ServerLevel level = source.getLevel();
+-        drops.forEach(drop -> {
+-            ItemEntity entity = new ItemEntity(level, pos.x, pos.y, pos.z, drop.copy());
+-            entity.setDefaultPickUpDelay();
+-            level.addFreshEntity(entity);
+-            usedItems.track(drop);
++    ) throws CommandSyntaxException {
++        final ServerLevel level = source.getLevel();
++        // CeruLean: 掉落物必须在**目标位置所属区域**的 tick 线程上生成。
++        // 在全局区域线程上调用 addFreshEntity 会 NPE：
++        //   ServerLevel.addEntity → getCurrentWorldData().captureDrops（区域外为 null）。
++        RegionCommandExecutor.onBlock(level, BlockPos.containing(pos), () -> {
++            drops.forEach(drop -> {
++                ItemEntity entity = new ItemEntity(level, pos.x, pos.y, pos.z, drop.copy());
++                entity.setDefaultPickUpDelay();
++                level.addFreshEntity(entity);
++                usedItems.track(drop);
++            });
++            return null;
+         });
+     }
+ 
