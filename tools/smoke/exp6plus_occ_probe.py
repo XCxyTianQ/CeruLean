@@ -222,6 +222,12 @@ record('C3 无幽灵分数（补偿清除了死实体条目）',
 
 # 收尾断言：OCC 机制"干净收场"，且补偿/竞争的可观测性可用
 final = counters()
+_summary = one('/cerulean exp')
+import re as _re
+_m = _re.search(r'最近一次校验：([^\n]+)', _summary)
+record('收尾 · 最近一次校验摘要可读（OCC 规模可观测）',
+       (_m.group(1)[:110].strip() if _m else '(缺失)'),
+       bool(_m and '方块读=' in _m.group(1) and '实体读=' in _m.group(1)))
 record('收尾 · 校验没有失控（耗尽 = 0）', f"exhausted={final.get('exhausted')}", final.get('exhausted', 0) == 0)
 record('收尾 · 补偿与竞争计数可见（回滚路径真的被走过）',
        f"补偿={final.get('comp')} 失败={final.get('compFail')} 竞争={final.get('race')}",

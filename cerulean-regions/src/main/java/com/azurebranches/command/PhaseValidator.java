@@ -107,6 +107,13 @@ public final class PhaseValidator {
     }
 
     /** Whether EXP3 validation is enabled at all. */
+    /** 最近一次校验的规模摘要（供 `/cerulean exp` 展示；尚未校验过时为占位串）。 */
+    private static volatile String lastValidationSummary = "(尚未发生过校验)";
+
+    public static String lastValidationSummary() {
+        return lastValidationSummary;
+    }
+
     public static boolean isEnabled() {
         try {
             return AzureBranchesConfig.get().expValidationEnabled();
@@ -207,6 +214,19 @@ public final class PhaseValidator {
     ) {
         if (!isEnabled()) {
             return ValidationResult.COMMIT; // bypass when disabled
+        }
+
+        // CeruLean: 记录"最近一次校验"的规模摘要 —— 排障时最想知道的就是
+        // "校验那一刻读集/写集到底有多大、三个数据域各有多少条目"。
+        try {
+            lastValidationSummary = "tick=" + snap.getSnapshotTick()
+                + " retry=" + retryCount
+                + " 方块读=" + snap.readSetSize() + " 方块写=" + snap.pendingWriteCount()
+                + " 计分读=" + snap.scoreReadSetCount() + " 计分写=" + snap.scoreCacheSize()
+                + " NBT读=" + snap.nbtReadSetSize() + " NBT写=" + snap.nbtCacheSize()
+                + " 实体读=" + (snap.getEntityReadSet() == null ? 0 : snap.getEntityReadSet().size());
+        } catch (final Throwable ignored) {
+            lastValidationSummary = "(摘要采集失败)";
         }
 
         final int maxRetries = maxRetries();
