@@ -1,0 +1,16 @@
+{
+  "name": "m6_control_push",
+  "origin": [72, -50, 8],
+  "blocks": [
+    [0, 0, 0, "minecraft:stone"],
+    [1, 0, 0, "minecraft:piston[facing=west]"]
+  ],
+  "power": [
+    [1, -1, 0, "minecraft:redstone_block"]
+  ],
+  "assert": [
+    {"type": "block_is", "pos": [-1, 0, 0], "block": "minecraft:stone"},
+    {"type": "block_is", "pos": [1, 0, 0], "block": "minecraft:piston[facing=west,extended=true]"}
+  ],
+  "wait_ms": 600
+}

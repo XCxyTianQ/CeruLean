@@ -47,6 +47,13 @@ L2_SELF = [
     ('L2 R1 存档往返', ['tools/smoke/scoreboard_persist_check.py', JAR, './smoke-persist']),
     ('L2 区域化命令（矩阵 + 混合压力）', ['tools/smoke/command_acceptance.py', JAR, './smoke-cmd']),
 ]
+# L3 语义层（docs/23 P5）：活塞 / 方块更新语义。单独起一次服（会炸方块、会 forceload 远处区块），
+# 不放在 L2-live 共用的那个服上，避免污染计分板与数据面断言。
+# 环境前提（无 >=2 调度线程 / 无装置脚本）时该子项返回 2=SKIP，与全局退出码约定一致。
+L3 = [
+    ('L3 语义层（活塞/更新语义：M1 + M6/M7 对照）',
+     ['tools/smoke/semantics_acceptance.py', JAR, './smoke-sem']),
+]
 
 results = []
 
@@ -83,7 +90,7 @@ boot()
 for label, args in L0 + L1 + L2_LIVE:
     run(label, args)
 subprocess.run(['tools/smoke/server-down.sh', RUN], env=ENV, capture_output=True)
-for label, args in L2_SELF:
+for label, args in L2_SELF + L3:
     run(label, args)
 
 print(f"\n{'=' * 74}\n== 汇总\n{'=' * 74}")

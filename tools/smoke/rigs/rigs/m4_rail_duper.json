@@ -1,0 +1,18 @@
+{
+  "name": "m4_rail_duper",
+  "origin": [40, -50, 8],
+  "blocks": [
+    [0, -1, 0, "minecraft:stone"],
+    [-1, -1, 0, "minecraft:stone"],
+    [0, 0, 0, "minecraft:rail"],
+    [1, 0, 0, "minecraft:piston[facing=west]"]
+  ],
+  "power": [
+    [1, -1, 0, "minecraft:redstone_block"]
+  ],
+  "assert": [
+    {"type": "block_is", "pos": [-1, 0, 0], "block": "minecraft:rail"},
+    {"type": "block_max_in_box", "block": "minecraft:rail", "n": 1, "box": [-1, 0, 0, 1, 0, 0]}
+  ],
+  "wait_ms": 600
+}

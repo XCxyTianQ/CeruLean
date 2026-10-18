@@ -61,6 +61,9 @@ Build 3 已完成 **OCC/EXP6Plus 之后的第二阶段**：修好 EOC 遗留的�
 
 ## 4. 剩余工作：EXP7 存储引擎（bLinear v4）
 
+> **2026-10-18 收尾备注**：按用户决定，本节整体**推迟到 Build 4**，Build 3 不碰存储引擎。
+> Build 3 的实际收尾内容、验收证据与一项新发现（M1 更新顺序反转）见 `docs/25`。
+
 ### 4.1 规模与可行性（已实测）
 
 - 新类：`BufferedLinearRegionFile`(1577) + `BufferedLinearRegionFileFlusher`(133) + `IRegionFile`(54)

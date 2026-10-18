@@ -1,0 +1,7 @@
+# L3 语义层闸门要求 PASS 的装置（每行一个，# 之后是注释）。
+# 只收两台对照：它们最确定，且在 vanilla 3 轮 / CeruLean 2 轮实测稳定。
+# m2–m5 是"机制前置观察装置"（docs/23 §11.3）：m2 的点燃判据依赖落地 tick，
+# 在 L3 联跑上下文里 2/2 失败、单独跑 3/3 通过（机制未定位）⇒ 不进发布闸门，
+# 仍可用 tools/smoke/rigs/run_rigs.py --only m2_tnt_duper 单独跑。
+m6_control_push
+m7_control_no_dupe

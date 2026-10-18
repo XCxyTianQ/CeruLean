@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sun, 18 Oct 2026 21:10:00 +0800
+Subject: [PATCH] CeruLean: dispatch block reads performed by commands to the owning region
+
+---
+命令（RCON/控制台）跑在 **global region tick 线程**上，而 Level.getBlockState 会读
+`getCurrentWorldData().captureTreeGeneration`——该 world data 只在"正在 tick 该 level 的
+区域线程"上非 null ⇒ 任何在控制台/RCON 上执行 `execute if block` 的命令都 NPE
+（docs/14 §4.1、docs/15 §3 早有记录；docs/23 的活塞语义探针因此被完全卡死）。
+
+处理：把 BlockInWorld.getState() 的单格读取投递到**拥有该区块的区域线程**同步取回，
+复用 data get 用的那套 AwaitableDispatch.call（有界等待 + 1.5s 快速失败，≥2 调度线程前提）。
+其余调用方（方块/实体 tick 内的 BlockPattern、AdventureModePredicate、已被 0015/0016 投递的
+FillCommand/CloneCommands 拷贝体）本来就是拥有者 ⇒ owns() 为真，走原地读取，行为不变。
+
+验收（docs/23 §11）：`execute if block` 在 CeruLean 上恢复可用 ⇒ M1/M6/M7 方块断言可观测。
+---
+diff --git a/net/minecraft/world/level/block/state/pattern/BlockInWorld.java b/net/minecraft/world/level/block/state/pattern/BlockInWorld.java
+index 8b83e53..6840364 100644
+--- a/net/minecraft/world/level/block/state/pattern/BlockInWorld.java
++++ b/net/minecraft/world/level/block/state/pattern/BlockInWorld.java
+@@ -23,7 +23,21 @@ public class BlockInWorld {
+ 
+     public BlockState getState() {
+         if (this.state == null && (this.loadChunks || this.level.hasChunkAt(this.pos))) {
+-            this.state = this.level.getBlockState(this.pos);
++            // CeruLean start - region threading: 命令可能跑在**没有区域 tick 上下文**的线程上
++            // （RCON / 控制台命令在 global region tick 线程执行）⇒ Level.getBlockState 在
++            // getCurrentWorldData().captureTreeGeneration 处 NPE（docs/14 §4.1、docs/23 §11）。
++            // 这一格读取投递到**拥有该区块的区域线程**同步取回（与 data get 同一套 AwaitableDispatch.call
++            // 语义）；其余调用方（方块/实体 tick 里的 BlockPattern、AdventureModePredicate、
++            // FillCommand/CloneCommands 已投递的拷贝体等）本来就是拥有者 ⇒ owns() 为真，
++            // 走原地读取，行为与上游逐字相同。
++            if (this.level instanceof final net.minecraft.world.level.Level actualLevel
++                && !io.cerulean.regions.AwaitableDispatch.owns(actualLevel, this.pos)) {
++                this.state = io.cerulean.regions.AwaitableDispatch.call(
++                    actualLevel, this.pos, () -> this.level.getBlockState(this.pos));
++            } else {
++                this.state = this.level.getBlockState(this.pos);
++            }
++            // CeruLean end
+         }
+ 
+         return this.state;

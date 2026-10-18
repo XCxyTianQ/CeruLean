@@ -1,0 +1,17 @@
+{
+  "name": "m7_control_no_dupe",
+  "origin": [88, -50, 8],
+  "blocks": [
+    [0, 0, 0, "minecraft:stone"],
+    [1, 0, 0, "minecraft:piston[facing=west]"]
+  ],
+  "power": [
+    [1, -1, 0, "minecraft:redstone_block"]
+  ],
+  "assert": [
+    {"type": "block_is", "pos": [-1, 0, 0], "block": "minecraft:stone"},
+    {"type": "block_max_in_box", "block": "minecraft:stone", "n": 1, "box": [-1, 0, 0, 1, 0, 0]},
+    {"type": "entity_max", "entity": "minecraft:tnt", "n": 0}
+  ],
+  "wait_ms": 600
+}

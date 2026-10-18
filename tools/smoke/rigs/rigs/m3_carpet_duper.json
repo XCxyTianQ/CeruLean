@@ -1,0 +1,18 @@
+{
+  "name": "m3_carpet_duper",
+  "origin": [24, -50, 8],
+  "blocks": [
+    [0, -1, 0, "minecraft:stone"],
+    [-1, -1, 0, "minecraft:stone"],
+    [0, 0, 0, "minecraft:white_carpet"],
+    [1, 0, 0, "minecraft:piston[facing=west]"]
+  ],
+  "power": [
+    [1, -1, 0, "minecraft:redstone_block"]
+  ],
+  "assert": [
+    {"type": "block_is", "pos": [-1, 0, 0], "block": "minecraft:white_carpet"},
+    {"type": "block_max_in_box", "block": "minecraft:white_carpet", "n": 1, "box": [-1, 0, 0, 1, 0, 0]}
+  ],
+  "wait_ms": 600
+}

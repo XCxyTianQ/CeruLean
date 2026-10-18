@@ -1,0 +1,61 @@
+{
+  "probe": "m1_piston_race",
+  "doc": "docs/23 §P1（不变量 S1：邻居更新队列语义）",
+  "baseline": "cerulean",
+  "label": "",
+  "started_at": "2026-10-18T21:03:37+0800",
+  "rounds": 20,
+  "rounds_requested": 20,
+  "distribution": {
+    "A": 0,
+    "B": 20,
+    "none": 0,
+    "unknown": 0
+  },
+  "dominant": "B",
+  "environment": {
+    "list": "There are 0 of a max of 5 players online:",
+    "gamerule_tnt_explodes": "Game rule tnt_explodes is currently set to true",
+    "platform": "minecraft:stone @ y=-51（只补空气）"
+  },
+  "geometry": {
+    "origin": [
+      0,
+      -50,
+      0
+    ],
+    "target": [
+      0,
+      -50,
+      0
+    ],
+    "a": [
+      1,
+      -50,
+      0
+    ],
+    "b": [
+      0,
+      -50,
+      1
+    ],
+    "power": [
+      1,
+      -50,
+      1
+    ],
+    "west": [
+      -1,
+      -50,
+      0
+    ],
+    "north": [
+      0,
+      -50,
+      -1
+    ]
+  },
+  "verdict": "FAIL",
+  "reason": "分布不一致：实测 [A=0 B=20 none=0 unknown=0] vs 期望 [A=20 B=0 none=0 unknown=0]，主导胜者 B vs A",
+  "note": "CeruLean 上的 M1 回归基线（docs/23 §11）。注意：vanilla 的分布是 A=20，与 CeruLean 的 B=20 相反——这是本轮探针发现的真实差异，不是抖动；该文件只作为 CeruLean 自身的回归基线，不代表与 vanilla 一致。"
+}

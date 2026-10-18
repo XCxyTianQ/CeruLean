@@ -1,0 +1,18 @@
+{
+  "name": "m5_suppression",
+  "origin": [56, -50, 8],
+  "blocks": [
+    [0, 0, 0, "minecraft:tnt"],
+    [1, 0, 1, "minecraft:redstone_block"],
+    [1, 0, 2, "minecraft:stone"],
+    [1, 0, 3, "minecraft:piston[facing=north]"]
+  ],
+  "power": [
+    [1, -1, 3, "minecraft:redstone_block"]
+  ],
+  "assert": [
+    {"type": "entity_min", "entity": "minecraft:tnt", "n": 1},
+    {"type": "block_max_in_box", "block": "minecraft:tnt", "n": 0, "box": [-1, 0, -1, 2, 1, 1]}
+  ],
+  "wait_ms": 400
+}

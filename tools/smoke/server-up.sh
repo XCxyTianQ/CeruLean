@@ -53,6 +53,10 @@ enable-command-block=true
 enable-rcon=true
 rcon.port=$RCON_PORT
 rcon.password=$RCON_PASSWORD
+# 26.3 默认 pause-when-empty-seconds=60：纯 RCON 探针服没有玩家 ⇒ 起服 60 秒后整个世界
+# 停止 tick（setblock 仍返回成功、/tick query 仍报 running normally），活塞/红石类断言
+# 会整台"原地不动"。实测见 docs/23 §11（rigs-matrix 首轮 M6/M7 因此误判失败）。
+pause-when-empty-seconds=0
 broadcast-rcon-to-ops=false
 spawn-protection=0
 max-players=5
