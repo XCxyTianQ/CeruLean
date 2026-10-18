@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sun, 18 Oct 2026 10:41:08 +0800
+Subject: [PATCH] CeruLean EXP OCC: CAS-based scoreboard compensation (narrow the race window)
+
+---
+修一处**设计债**：计分回滚补偿改用锁内 compare-and-set。
+
+背景（docs/19 §6）：upstream 靠"`/scoreboard` 全程在全局 tick 独占执行"来保证补偿期间没人能插队；
+本项目改用区域线程 + `Scoreboard.stateLock`（`0022`），`/scoreboard` 不再独占全局 tick，
+于是"补偿写"与"并发写"之间存在窗口。原来的补偿是**盲目减法**：
+
+    final int target = currentScore - netDelta;
+    writer.setScore(objective, holder, target);
+
+`netDelta = 本相位写入值 − 写前值`。对 `add` 语义这是对的（并发加减会被保留），
+但对 `set` 语义是错的：相位 `set 5`（旧值 0）后，玩家又 `set 100`，回滚会把 100 改成 95。
+
+本补丁做两件事：
+
+1) `Scoreboard.setScoreIfUnchanged(objective, holder, expected, newValue)`
+   在 `stateLock` 内完成"读-判-写"（`stateLock` 是 `ReentrantLock`，可与 `mutate()` 嵌套），
+   当前值仍等于 `expected` 才写，否则返回 false —— 真正的 CAS，不会与区域线程的并发写交错。
+
+2) 补偿逻辑：值仍等于本相位写入值时走 CAS **精确还原为写前值**；CAS 失败（被插队）
+   或值早已被别人改过时，退回"减去本相位净增量"（保留并发加减语义），并计数
+   `ExpChainSupport.onScoreCompensationRace()`，由 `/cerulean exp` 的"补偿：… / 竞争 N"暴露。
+   `ScoreWriter` 新增 `default compareAndSet(...)`（默认退化为 `setScore`），旧 lambda 不受影响；
+   回滚处的 writer 升级为匿名类，实现真正的 CAS，并保留 EXP6Plus 的幽灵守卫（死实体的 holder 不回写）。
+
+为什么不是"完全对齐 upstream"：要做到等价需要把 `/scoreboard` 整体搬到全局 tick 上独占
+（upstream 是 1140 行整文件覆盖 + `registerRemote` 屏障），那是另一条路线，改动量大一个数量级。
+本补丁是 **在现有架构下把窗口收窄到单次锁内**，并用"竞争计数"如实暴露残余风险 ——
+语义是"要么精确还原，要么保留并发增量"，两者都不会静默改坏别人的写。
+
+实测：`:cerulean-server:compileJava` 零错误。
+---
+diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
+index b47f456..4473f69 100644
+--- a/net/minecraft/world/level/block/CommandBlock.java
++++ b/net/minecraft/world/level/block/CommandBlock.java
+@@ -543,7 +543,10 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+                     (objective, holder) -> level.getScoreboard().getOrCreatePlayerScore(
+                         net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
+                         level.getScoreboard().getObjective(objective)).get(),
+-                    (objective, holder, value) -> {
++                    new com.azurebranches.command.ScoreLayer.ScoreWriter() {
++                        @Override
++                        public void setScore(final String objective, final String holder, final int value) {
++
+                         if (deadHolderNames.contains(holder)) {
+                             // EXP6Plus ghost-score guard: the holder's entity
+                             // died. Folia disabled Scoreboard.entityRemoved
+@@ -564,7 +567,20 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+                         level.getScoreboard().getOrCreatePlayerScore(
+                             net.minecraft.world.scores.ScoreHolder.forNameOnly(holder),
+                             level.getScoreboard().getObjective(objective)).set(value);
+-                    });
++                    
++                        }
++
++                        @Override
++                        public boolean compareAndSet(final String objective, final String holder,
++                                                      final int expectedCurrent, final int target) {
++                            // EXP6Plus 幽灵守卫：holder 的实体已死 ⇒ 不回写（清除条目由 setScore 分支负责）
++                            if (deadHolderNames.contains(holder)) {
++                                return false;
++                            }
++                            return level.getScoreboard().setScoreIfUnchanged(
++                                objective, holder, expectedCurrent, target);
++                        }
++                        });
+             } catch (final Throwable t) {
+                 System.err.println("[AzureBranches] score compensation wiring failed: " + t.getMessage());
+             }
+diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
+index 282e4b3..dbd6627 100644
+--- a/net/minecraft/world/scores/Scoreboard.java
++++ b/net/minecraft/world/scores/Scoreboard.java
+@@ -93,6 +93,36 @@ public class Scoreboard {
+         return this.playerScores.computeIfAbsent(name, k -> new PlayerScores());
+     }
+ 
++    /**
++     * CeruLean: 锁内的 compare-and-set —— 仅当当前值仍等于 {@code expected} 时写入 {@code newValue}。
++     *
++     * <p>用途：EXP 链回滚的计分补偿。本项目没有 upstream 的"全局 tick 独占"语义
++     * （`/scoreboard` 在区域线程上跑，靠本类的 {@code stateLock} 保复合操作原子），
++     * 因此"补偿写"与"并发写"之间存在窗口。用 CAS 把"读-判-写"放进同一把锁，
++     * 值已被别人改过时**放弃本次补偿**，而不是用盲目减法把并发的写改坏。</p>
++     *
++     * @return true 表示已写入；false 表示 objective 不存在或当前值已不等于 expected
++     */
++    public boolean setScoreIfUnchanged(final String objectiveName, final String holderName,
++                                       final int expected, final int newValue) {
++        final Objective objective = this.objectivesByName.get(objectiveName);
++        if (objective == null) {
++            return false;
++        }
++        this.stateLock.lock();
++        try {
++            final ScoreAccess access = this.getOrCreatePlayerScore(
++                ScoreHolder.forNameOnly(holderName), objective);
++            if (access.get() != expected) {
++                return false;
++            }
++            access.set(newValue);
++            return true;
++        } finally {
++            this.stateLock.unlock();
++        }
++    }
++
+     public ScoreAccess getOrCreatePlayerScore(final ScoreHolder holder, final Objective objective) {
+         return this.getOrCreatePlayerScore(holder, objective, false);
+     }

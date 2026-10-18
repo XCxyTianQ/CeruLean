@@ -57,6 +57,12 @@ def counters():
     m = re.search(r'NBT写拦截 (\d+)', out)
     if m:
         c['nbt'] = int(m.group(1))
+    m = re.search(r'补偿：计分 (\d+) / 失败 (\d+)', out)
+    if m:
+        c['comp'], c['compFail'] = map(int, m.groups())
+    m = re.search(r'/ 竞争 (\d+)', out)
+    if m:
+        c['race'] = int(m.group(1))
     return c
 
 
@@ -190,6 +196,15 @@ ghost5, ghost7, noentry = lines.count('P3-GHOST-5'), lines.count('P3-GHOST-7'), 
 record('C3 无幽灵分数（补偿清除了死实体条目）',
        f'NO-ENTRY={noentry} GHOST-5={ghost5} GHOST-7={ghost7}',
        noentry >= 1 and ghost5 == 0 and ghost7 == 0)
+
+# 收尾断言：OCC 机制"干净收场"，且补偿/竞争的可观测性可用
+final = counters()
+record('收尾 · 校验没有失控（耗尽 = 0）', f"exhausted={final.get('exhausted')}", final.get('exhausted', 0) == 0)
+record('收尾 · 补偿与竞争计数可见（回滚路径真的被走过）',
+       f"补偿={final.get('comp')} 失败={final.get('compFail')} 竞争={final.get('race')}",
+       'comp' in final and 'race' in final and (final.get('comp', 0) + final.get('compFail', 0)) >= 1)
+record('收尾 · 至少两次校验通过（C1 COMMIT + 至少一次收尾 COMMIT）',
+       f"通过={final.get('passed')}", final.get('passed', 0) >= 2)
 
 # 收尾
 for x in (4, 8, 12):

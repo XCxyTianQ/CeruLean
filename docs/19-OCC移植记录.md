@@ -175,9 +175,18 @@ C1（实体存活 → COMMIT）仍然失败：`retry 0→3`、`SET-OK=0`。本�
 3. **EXP6Plus 完整验收用例**：`exp6-smoke.py` / `exp6plus-smoke.py` 依赖"多区域 + 外部并发写"
    才能触发 RETRY；单区域冒烟环境构造不出来（同 `docs/17` §4 的限制）。目前能证明的是
    "读集非空 + 校验跑过 + 链挂起/恢复"，**不能证明冲突重试与补偿的真实效果**。
-4. **路线 B 的设计债**：`/scoreboard` 仍走 CeruLean 的 `stateLock` 直读（不是 upstream 的
-   "全局 tick 独占"），因此回滚补偿是多条 `putScore` 的批操作，若有玩家区域线程并发 `add`，
-   `netDelta` 语义仍会漂。upstream 用独占规避，本项目没有等价保证。
+4. **路线 B 的设计债 —— 已收窄（`0029`）**：`/scoreboard` 仍走 `stateLock` 直读（不是 upstream 的
+   "全局 tick 独占"），补偿与并发写之间有窗口。原来用**盲目减法** `currentScore - netDelta`，
+   对 `set` 语义是错的（相位 `set 5` 后玩家又 `set 100`，回滚会把 100 改成 95）。
+
+   现在改为：`Scoreboard.setScoreIfUnchanged(...)` 在 `stateLock` 内做**读-判-写**（CAS），
+   值仍等于本相位写入值时**精确还原写前值**；CAS 失败或值早已被改过时退回增量减法
+   （保留并发加减语义），并计数 `ExpChainSupport.onScoreCompensationRace()`
+   （`/cerulean exp` 的 `补偿：… / 竞争 N`）。
+
+   **残余风险（如实说明）**：锚定"全局 tick 独占"才能完全消除；本改动把窗口收窄到单次锁内，
+   并用计数如实暴露。计分补偿在实测里是 `补偿=1 / 失败=1 / 竞争=1` —— 竞争计数说明
+   回退路径真的被走到过，不是理论值。
 
 ## 7. 本轮改动清单
 

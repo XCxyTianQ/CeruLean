@@ -397,6 +397,14 @@ public final class ExpChainSupport {
     private static final AtomicLong dataInterceptBlockWrites = new AtomicLong();
     private static final AtomicLong dataInterceptBlockReads = new AtomicLong();
     private static final AtomicLong blockReadsRecorded = new AtomicLong();
+    /**
+     * CeruLean: 回滚补偿时发现"这个分数键在我们写入之后又被别人改过"的次数。
+     *
+     * <p>本项目没有 upstream 的"全局 tick 独占"语义（`/scoreboard` 走区域线程 + `stateLock`），
+     * 所以补偿与并发写之间存在窗口。该计数 &gt; 0 就说明这个窗口真的被撞上过，
+     * 运维可以据此判断隔离级别的实际强度。</p>
+     */
+    private static final AtomicLong scoreCompensationRaces = new AtomicLong();
 
     // EXP4: Scoreboard compensation statistics
     private static final AtomicLong scoreCompensations = new AtomicLong();
@@ -449,6 +457,11 @@ public final class ExpChainSupport {
     public static void onBlockReadRecorded() { blockReadsRecorded.incrementAndGet(); }
 
     public static long blockReadRecordedCount() { return blockReadsRecorded.get(); }
+
+    /** 记录一次"补偿时发现分数键已被并发修改"。 */
+    public static void onScoreCompensationRace() { scoreCompensationRaces.incrementAndGet(); }
+
+    public static long scoreCompensationRaceCount() { return scoreCompensationRaces.get(); }
 
     /** EXP5Plus: Record a score write intercepted at the data pool level. */
     public static void onScoreInterceptWrite() { scoreInterceptWrites.incrementAndGet(); }

@@ -74,6 +74,21 @@ public final class ScoreLayer {
     @FunctionalInterface
     public interface ScoreWriter {
         void setScore(String objective, String holder, int value);
+
+        /**
+         * CeruLean: 锁内的 compare-and-set —— 仅当当前值仍是 {@code expectedCurrent} 时才写 {@code target}。
+         *
+         * <p>默认实现退化为无条件 {@link #setScore} 并返回 true（保持旧 lambda 可编译）。
+         * 真正实现原子语义的写法见 `Scoreboard.setScoreIfUnchanged(...)`：
+         * 它在 {@code stateLock} 内完成"读-判-写"，因此不会与区域线程上的并发写交错。</p>
+         *
+         * @return true 表示写入已生效；false 表示值已被别人改过、本次未写
+         */
+        default boolean compareAndSet(final String objective, final String holder,
+                                      final int expectedCurrent, final int target) {
+            setScore(objective, holder, target);
+            return true;
+        }
     }
 
     // ================================================================
@@ -154,10 +169,21 @@ public final class ScoreLayer {
                 continue;
             }
 
-            // Apply inverse compensation: subtract the Phase's net effect
+            // CeruLean: 优先"精确还原"（锁内 CAS）。
+            // 若并发写把值改掉了（currentScore != cachedNew），退回"减去本相位净增量"，
+            // 这样并发的加减不会被抹掉；同时计数，让运维看得到隔离强度。
             final int target = currentScore - netDelta;
             try {
-                writer.setScore(objective, holder, target);
+                if (currentScore == cachedNew) {
+                    if (!writer.compareAndSet(objective, holder, cachedNew, oldValue)) {
+                        // 读与写之间被插队：退回增量补偿
+                        ExpChainSupport.onScoreCompensationRace();
+                        writer.setScore(objective, holder, target);
+                    }
+                } else {
+                    ExpChainSupport.onScoreCompensationRace();
+                    writer.setScore(objective, holder, target);
+                }
                 compensated++;
             } catch (final Exception e) {
                 // Write failed — scoreboard state may be inconsistent.

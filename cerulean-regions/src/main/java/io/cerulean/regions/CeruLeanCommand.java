@@ -99,7 +99,8 @@ public final class CeruLeanCommand {
             .append(" / NBT缓存命中 ").append(com.azurebranches.command.ExpChainSupport.nbtCacheHitCount());
         out.append('\n').append("  补偿：计分 ").append(com.azurebranches.command.ExpChainSupport.scoreCompensationCount())
             .append(" / 失败 ").append(com.azurebranches.command.ExpChainSupport.scoreCompensationFailureCount())
-            .append(" / NBT ").append(com.azurebranches.command.ExpChainSupport.nbtCompensationCount());
+            .append(" / NBT ").append(com.azurebranches.command.ExpChainSupport.nbtCompensationCount())
+            .append(" / 竞争 ").append(com.azurebranches.command.ExpChainSupport.scoreCompensationRaceCount());
         context.getSource().getSender().sendMessage(Component.text(out.toString()));
         return 1;
     }
