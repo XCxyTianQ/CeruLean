@@ -102,10 +102,23 @@ chain(8, ['loot spawn 4 70 8 loot minecraft:chests/simple_dungeon', 'say CMD-LOO
 record('链内 · /loot spawn（区域线程）', '(见日志 CMD-LOOT-DONE 与异常)', True)
 
 # ── /datapack & /reload ──
-# /reload 与 /datapack：本轮**暂缓注册**（资源重载内部 wait() 在 tick 线程非法），只记录现状
-for cmd in ('datapack list', 'reload'):
-    out = one(cmd, wait=6.0)
-    print(f"  [SKIP] /{cmd} 暂缓注册 -> {out[:70]}")
+# /datapack：list 正常；enable|disable 会触发重载（走 globalTickExecutor）
+out = one('datapack list')
+record('RCON · /datapack list', out[:80], diff_ok(out, 'data pack(s) enabled'))
+
+# /reload：判据是"重载真的跑完了" —— 日志里 "Loaded N advancements" 会多一次（启动 1 次 + 每次重载 1 次）
+def adv_count():
+    try:
+        return open(LOG, encoding='utf-8', errors='replace').read().count('Loaded 1866 advancements')
+    except OSError:
+        return -1
+before = adv_count()
+out = one('reload', wait=6.0)
+time.sleep(8)
+after = adv_count()
+record('RCON · /reload 真的完成（日志新增一次资源加载）',
+       f'"{out[:24]}" advancements {before}->{after}', diff_ok(out, 'Reloading')) 
+record('RCON · /reload 完成后服务器仍健康', f'advancements={after}', after == before + 1)
 
 # ── /function ──
 out = one('function minecraft:no_such_function')
@@ -115,9 +128,13 @@ chain(8, ['function minecraft:no_such_function', 'say CMD-FN-DONE'])
 record('链内 · /function（区域线程）', '(见日志 CMD-FN-DONE)', True)
 
 # ── /spreadplayers ──
-# /spreadplayers：本轮**暂缓注册**（需 async 传送重写），只记录现状，不计入失败
-out = one('spreadplayers 0 0 1 3 false @e[type=minecraft:zombie,limit=1]')
-print(f"  [SKIP] /spreadplayers 暂缓注册 -> {out[:80]}")
+# /spreadplayers：判据是"实体真的被传送了"（位置变化），而不是命令回显
+pos_before = one('data get entity @e[type=minecraft:zombie,limit=1] Pos')
+out = one('spreadplayers 0 0 1 3 false @e[type=minecraft:zombie,limit=1]', wait=6.0)
+time.sleep(4)
+pos_after = one('data get entity @e[type=minecraft:zombie,limit=1] Pos')
+record('RCON · /spreadplayers（整条命令派发到中心区域 + async 传送）',
+       f'{pos_before[-46:]} -> {pos_after[-46:]}', pos_before != pos_after and not bad(out))
 
 # ── 日志侧异常检查 ──
 try:

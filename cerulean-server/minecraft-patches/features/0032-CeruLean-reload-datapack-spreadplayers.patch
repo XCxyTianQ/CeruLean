@@ -1,0 +1,219 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sun, 18 Oct 2026 16:22:44 +0800
+Subject: [PATCH] CeruLean: enable /reload, /datapack and /spreadplayers (global-tick executor + async teleport)
+
+---
+把上一版**暂缓**的三条命令修好：`/reload`、`/datapack`、`/spreadplayers`。
+
+## /reload 与 /datapack
+
+上一版实测：把 `reloadResources` 派发到全局 tick 后，资源重载内部
+`SimpleReloadInstance` 抛 `UnsupportedOperationException`。本轮定位到真正原因：
+`SimpleReloadInstance` 的 barrier 用 **`mainThreadExecutor.execute(...)`** 推进，
+而 `loadResources(..., this.executor, this)` 传的 `mainThreadExecutor` 是 **MinecraftServer 自己**
+—— 它继承自 blockable event loop，在 Folia 上那个队列**没有任何线程会 drain**（tick 线程上用还会直接抛）。
+
+修法：`MinecraftServer` 新增 `globalTickExecutor` —— 一个把任务投递到
+`RegionizedServer.addTask(...)` 的 `Executor`（即"全局区域 tick 线程"的语义化封装），
+并把 `loadResources` 的 `mainThreadExecutor` 参数从 `this` 换成它。
+启动早期全局调度器尚未建立时退化为 `Util.backgroundExecutor()`。
+
+于是：pack 仓库的变更仍在全局 tick 上做，重载的 barrier/apply 阶段投递到全局 tick 队列，
+`managedBlock` 守卫（上一版）保证 tick 线程不阻塞。
+
+实测：`/reload` 连续两次都完成（日志出现两次 "Loaded 1866 advancements"），
+`/datapack list` 正常，**0 未捕获异常**，服务器不关停。
+
+## /spreadplayers
+
+两处故障：候选落点计算（`Position.getSpawnY`/`Position.isSafe`）在区域线程之外读方块会 NPE
+（`getCurrentWorldData()` 为 null）；传送走 `Entity.teleportTo` 会抛
+"Must use teleportAsync while in region threading"。
+
+修法：
+  * 新增 `spreadPlayersDispatch(...)`：把**整条 `spreadPlayers` 派发到中心位置所属区域**的 tick 线程
+    （`RegionCommandExecutor.onBlockRegionAsync`），命令立即返回 1，失败经 `runOnSource` 回报；
+  * `setPlayerPositions` 的传送改成 `getBukkitEntity().teleportAsync(Location, TeleportCause.COMMAND)`。
+
+实测：僵尸从 (4.5, 64.0, 8.5) 被散布到 (2.5, -60.0, 1.5)（落在超平坦地面），无异常。
+
+**已知限制**（写进注释）：`maxRange` 大到跨多个区域时，候选位置的方块读仍发生在中心区域线程上；
+严格来说应逐位置派发（upstream 的 378 行覆盖层也只处理了传送 Y，从控制台跑同样会 NPE）。
+
+实测：`:cerulean-server:compileJava` 零错误；命令矩阵探针与冒烟均通过。
+---
+diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
+index 71dc5f4..57e277f 100644
+--- a/net/minecraft/commands/Commands.java
++++ b/net/minecraft/commands/Commands.java
+@@ -213,9 +213,7 @@ public class Commands {
+         // 注意：scoreboard / clone 现由 0015/0016 做区域安全化后放开。
+         DataCommands.register(this.dispatcher, context);
+         // CeruLean end - re-enable data command
+-        //DataPackCommand.register(this.dispatcher, context); // CeruLean - 暂不恢复：见 0031 说明
+-        // /datapack enable|disable 会触发资源重载，而 SimpleReloadInstance 内部用 wait()，
+-        // 在 tick 线程上直接抛 UnsupportedOperationException（实测 /reload 即此路径）。
++        DataPackCommand.register(this.dispatcher, context); // CeruLean - 重新启用 datapack（重载 barrier 投递到全局 tick，见 0032）
+         //DebugCommand.register(this.dispatcher); // Folia - region threading - TODO
+         DefaultGameModeCommands.register(this.dispatcher);
+         //DialogCommand.register(this.dispatcher, context); // Folia - region threading - TODO
+@@ -245,9 +243,7 @@ public class Commands {
+         PlaySoundCommand.register(this.dispatcher);
+         PostEffectCommand.register(this.dispatcher);
+         RandomCommand.register(this.dispatcher);
+-        //ReloadCommand.register(this.dispatcher); // CeruLean - 暂不恢复：见 0031 说明
+-        // 实测：把 reloadResources 派发到全局 tick 后，资源重载内部 SimpleReloadInstance.wait()
+-        // 在 tick 线程上非法 → CompletionException；即使不阻塞（见 MinecraftServer 的守卫）也拿不到成功。
++        ReloadCommand.register(this.dispatcher); // CeruLean - 重新启用 reload（同上，见 0032）
+         // 正解：在**非 tick 线程**上跑重载，只把全局状态变更放回全局 tick（需改 SimpleReloadInstance 的等待方式）。
+         RecipeCommand.register(this.dispatcher);
+         FetchProfileCommand.register(this.dispatcher);
+@@ -268,9 +264,7 @@ public class Commands {
+         SetSpawnCommand.register(this.dispatcher);
+         SetWorldSpawnCommand.register(this.dispatcher);
+         //SpectateCommand.register(this.dispatcher); // Folia - region threading - TODO later
+-        //SpreadPlayersCommand.register(this.dispatcher); // CeruLean - 暂不恢复：见 0031 说明
+-        // 实测 /spreadplayers 在控制台（全局区域线程）会炸两处：
+-        //   Level.getBlockState → getCurrentWorldData() NPE；Entity.teleport → "Must use teleportAsync"。
++        SpreadPlayersCommand.register(this.dispatcher); // CeruLean - 重新启用 spreadplayers（整体派发到中心区域 + teleportAsync，见 0032）
+         // 正解是把整条命令改成 async 传送 + 逐位置区域派发（upstream 是 378 行整文件覆盖），
+         // 与 EXP 链语义无关，故留作后续工作而不是给一条必 NPE 的命令。
+         StopSoundCommand.register(this.dispatcher);
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 48f7eb2..3a02e0b 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -276,6 +276,25 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     private boolean usingWhitelist;
+     private float smoothedTickTimeMillis;
+     private final Executor executor;
++    /**
++     * CeruLean: 把"主线程执行器"语义映射到 Folia 的**全局区域 tick 线程**。
++     *
++     * <p>Folia 没有传统意义的主线程，`MinecraftServer.execute(...)` 在 tick 线程上是非法的
++     * （会把 blockable event loop 的队列交给永不 drain 的地方）。资源重载的
++     * `SimpleReloadInstance` 需要 `mainThreadExecutor.execute(...)` 来推进 barrier/apply 阶段，
++     * 因此这里提供一个"投递到全局 tick 队列"的执行器：非阻塞、且语义正确。</p>
++     */
++    private final Executor globalTickExecutor = task -> {
++        final io.papermc.paper.threadedregions.RegionizedServer rs =
++            io.papermc.paper.threadedregions.RegionizedServer.getInstance();
++        if (rs == null) {
++            // 启动早期（全局调度器尚未建立）退化为后台池。
++            // 注意不能引用 this.executor：字段初始化早于构造函数里的赋值。
++            Util.backgroundExecutor().execute(task);
++        } else {
++            rs.addTask(task);
++        }
++    };
+     private @Nullable String serverId;
+     private MinecraftServer.ReloadableResources resources;
+     private final StructureTemplateManager structureTemplateManager;
+@@ -2443,7 +2462,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+                             this.isDedicatedServer() ? Commands.CommandSelection.DEDICATED : Commands.CommandSelection.INTEGRATED,
+                             this.getFunctionCompilationPermissions(),
+                             this.executor,
+-                            this
++                            this.globalTickExecutor // CeruLean: 资源重载的 barrier/apply 投递到全局 tick
+                         )
+                         .whenComplete((unit, throwable) -> {
+                             if (throwable != null) {
+diff --git a/net/minecraft/server/commands/SpreadPlayersCommand.java b/net/minecraft/server/commands/SpreadPlayersCommand.java
+index 04cf77b..8c51955 100644
+--- a/net/minecraft/server/commands/SpreadPlayersCommand.java
++++ b/net/minecraft/server/commands/SpreadPlayersCommand.java
+@@ -58,8 +58,8 @@ public class SpreadPlayersCommand {
+                                                 .then(
+                                                     Commands.argument("targets", EntityArgument.entities())
+                                                         .executes(
+-                                                            c -> spreadPlayers(
+-                                                                c.getSource(),
++                                                            c -> spreadPlayersDispatch(
++                                                                c,
+                                                                 Vec2Argument.getVec2(c, "center"),
+                                                                 FloatArgumentType.getFloat(c, "spreadDistance"),
+                                                                 FloatArgumentType.getFloat(c, "maxRange"),
+@@ -79,8 +79,8 @@ public class SpreadPlayersCommand {
+                                                                 .then(
+                                                                     Commands.argument("targets", EntityArgument.entities())
+                                                                         .executes(
+-                                                                            c -> spreadPlayers(
+-                                                                                c.getSource(),
++                                                                            c -> spreadPlayersDispatch(
++                                                                                c,
+                                                                                 Vec2Argument.getVec2(c, "center"),
+                                                                                 FloatArgumentType.getFloat(c, "spreadDistance"),
+                                                                                 FloatArgumentType.getFloat(c, "maxRange"),
+@@ -99,6 +99,45 @@ public class SpreadPlayersCommand {
+         );
+     }
+ 
++    /**
++     * CeruLean: 把 `/spreadplayers` 整体派发到**中心位置所属区域**的 tick 线程。
++     *
++     * <p>为什么必须这样：候选位置的落点计算（`Position.getSpawnY` / `Position.isSafe`）
++     * 要读方块，而 `Level.getBlockState` 在区域线程之外会 NPE
++     * （`getCurrentWorldData()` 为 null）；传送本身在 Folia 上也只能走 `teleportAsync`。</p>
++     *
++     * <p>命令立即返回 1，实际散布与反馈在目标区域线程上完成（反馈经 `runOnSource` 送回源）。
++     * **已知限制**：`maxRange` 大到跨多个区域时，候选位置的方块读仍发生在中心区域线程上，
++     * 严格来说应逐位置派发（upstream 的 378 行覆盖层也只处理了传送 Y）。</p>
++     */
++    private static int spreadPlayersDispatch(
++        final com.mojang.brigadier.context.CommandContext<CommandSourceStack> c,
++        final Vec2 center,
++        final float spreadDistance,
++        final float maxRange,
++        final int maxHeight,
++        final boolean respectTeams,
++        final Collection<? extends Entity> entities
++    ) {
++        final CommandSourceStack source = c.getSource();
++        final net.minecraft.server.level.ServerLevel level = source.getLevel();
++        final int cx = Mth.floor(center.x) >> 4;
++        final int cz = Mth.floor(center.y) >> 4;
++        RegionCommandExecutor.<Void>onBlockRegionAsync(level, cx, cz, () -> {
++            try {
++                spreadPlayers(source, center, spreadDistance, maxRange, maxHeight, respectTeams, entities);
++            } catch (final com.mojang.brigadier.exceptions.CommandSyntaxException e) {
++                RegionCommandExecutor.runOnSource(source, () ->
++                    source.sendFailure(net.minecraft.network.chat.Component.literal(e.getRawMessage().getString())));
++            } catch (final Throwable t) {
++                RegionCommandExecutor.runOnSource(source, () ->
++                    source.sendFailure(net.minecraft.network.chat.Component.literal("spreadplayers failed: " + t)));
++            }
++            return null;
++        });
++        return 1;
++    }
++
+     private static int spreadPlayers(
+         final CommandSourceStack source,
+         final Vec2 center,
+@@ -256,17 +295,19 @@ public class SpreadPlayersCommand {
+                 position = positions[positionIndex++];
+             }
+ 
+-            entity.teleportTo(
+-                level,
++            // CeruLean: Folia 上 `Entity.teleportTo` 会抛
++            // "UnsupportedOperationException: Must use teleportAsync while in region threading"。
++            // 实体可能不在本区域，必须走 async 传送（Paper API），由目标区域线程完成。
++            final org.bukkit.Location _target = new org.bukkit.Location(
++                level.getWorld(),
+                 Mth.floor(position.x) + 0.5,
+                 position.getSpawnY(level, maxHeight),
+                 Mth.floor(position.z) + 0.5,
+-                Set.of(),
+                 entity.getYRot(),
+-                entity.getXRot(),
+-                true
+-                , org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.COMMAND // CraftBukkit - handle teleport reason
++                entity.getXRot()
+             );
++            entity.getBukkitEntity().teleportAsync(
++                _target, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.COMMAND);
+             double closest = Double.MAX_VALUE;
+ 
+             for (SpreadPlayersCommand.Position testPosition : positions) {
