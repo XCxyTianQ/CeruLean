@@ -46,6 +46,34 @@ def one(cmd, wait=2.0):
         return (r.cmd(cmd, wait=wait, first_wait=30.0) or '').strip().replace('\n', ' ⏎ ')
 
 
+def _scheduler_threads(tries=20, delay=1.0):
+    """Folia 调度器当前线程数（经 /cerulean regions）。
+
+    环境前提：`data get block` 这类"命令契约要求同步返回值"的读取要把世界访问投递到目标区域
+    并**同步等待**。调度器只有 1 个线程时，global region 与目标 world region 共用同一个调度线程
+    ⇒ 等待等于等自己 ⇒ `AwaitableDispatch` 的 1500ms 快速失败触发，**本探针的观测手段本身失效**。
+    实测（2026-10-18）：机器负载高时 Folia 只起 1 个调度线程，整轮 T4 因此误报失败。
+    这属于"未验证"而不是"失败"，必须显式区分。
+    """
+    for _ in range(tries):
+        m = re.search(r'调度线程 (\d+)', one('/cerulean regions'))
+        if m and int(m.group(1)) >= 2:
+            return int(m.group(1))
+        time.sleep(delay)
+    m = re.search(r'调度线程 (\d+)', one('/cerulean regions'))
+    return int(m.group(1)) if m else 0
+
+
+def require_two_scheduler_threads():
+    n = _scheduler_threads()
+    if n < 2:
+        print(f"[SKIP] 环境前提不满足：Folia 调度器当前只有 {n} 个线程。")
+        print("        同步跨区域读取（data get block 等）在此前提下会自交锁（docs/17 §4）。")
+        print("        本探针的观测手段依赖它 ⇒ 记作未验证（exit 2），不计失败。")
+        sys.exit(2)
+    print(f"  调度器线程数 = {n}")
+
+
 def record(label, cmd, got, ok):
     (OK if ok else FAIL).append((label, cmd, got))
     print(f"  [{'OK  ' if ok else 'FAIL'}] {label}\n         $ {cmd}\n         -> {str(got)[:200]}")
@@ -91,6 +119,7 @@ def log_text():
         return ''
 
 
+require_two_scheduler_threads()
 print(f"== T4 EXP 链验收：mode={MODE}")
 
 # ── 预热：必须先证明"投递到该区域的命令能跑通" ────────────────────
