@@ -38,6 +38,22 @@
 
 这是 `0033`/`0034` 之后**第一次**在一轮全量套件里同时全绿（docs/24 §3.2 的遗留问题就此关闭）。
 
+### 3.1.1 发布版 jar 上的最终闸门（含新的 L3）
+
+在 tag 提交上以 `BUILD_NUMBER=3` 构建的发布 jar（`Implementation-Version: 26.3-3-e2cd89b`）上再跑一次完整套件：
+
+    PASS  L0 基座活性                                     (10s)
+    PASS  L1 可观测面                                     (19s)
+    PASS  L2 T1/T2/T3 scoreboard+clone                    (132s)
+    PASS  L2 R1 scoreboard 压力                           (422s)
+    PASS  L2 T4 EXP 链（SAFE+EXP 两轮起服）               (851s)
+    PASS  L2 R1 存档往返                                  (59s)
+    PASS  L2 区域化命令（矩阵 + 混合压力）                (578s)
+    PASS  L3 语义层（活塞/更新语义：M1 + M6/M7 对照）      (161s)
+
+**8 PASS / 0 FAIL / 0 SKIP**（exit 0）。日志留档：
+`AzureCores/reports/evidence/build3-final/suite-final-26.3-build.3.log`。
+
 ### 3.2 语义层（docs/23）
 
 | 项 | vanilla | CeruLean | 结论 |
