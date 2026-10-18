@@ -1,0 +1,58 @@
+{
+  "name": "m2_tnt_push_precursor",
+  "origin": [
+    8,
+    -50,
+    8
+  ],
+  "blocks": [
+    [
+      0,
+      0,
+      0,
+      "minecraft:tnt"
+    ],
+    [
+      1,
+      0,
+      0,
+      "minecraft:piston[facing=west]"
+    ],
+    [
+      -2,
+      0,
+      0,
+      "minecraft:redstone_block"
+    ]
+  ],
+  "power": [
+    [
+      1,
+      -1,
+      0,
+      "minecraft:redstone_block"
+    ]
+  ],
+  "assert": [
+    {
+      "type": "entity_min",
+      "entity": "minecraft:tnt",
+      "n": 1
+    },
+    {
+      "type": "block_max_in_box",
+      "block": "minecraft:tnt",
+      "n": 0,
+      "box": [
+        -2,
+        -1,
+        0,
+        1,
+        1,
+        1
+      ]
+    }
+  ],
+  "wait_ms": 400,
+  "note": "本装置**不是 TNT 复制机**：它只测「活塞把 TNT 推到位 + 落地 tick 点燃」这条机制前置，复制判据（无损失地刷出 primed TNT）未实现，见 docs/23 §11.10。"
+}

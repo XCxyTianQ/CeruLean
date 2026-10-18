@@ -28,7 +28,7 @@ docs/23 §6.1 的判定原则是「同一装置在三档基线上观测逐项相
     python3 tools/smoke/rigs/rig_common.py --rig tools/smoke/rigs/rigs/m6_control_push.json --json
 
     # 只校验 JSON 契约，不连服（CI / 写装置时用）
-    python3 tools/smoke/rigs/rig_common.py --check-json tools/smoke/rigs/rigs/m2_tnt_duper.json
+    python3 tools/smoke/rigs/rig_common.py --check-json tools/smoke/rigs/rigs/m2_tnt_push_precursor.json
 
     # 临时发一条命令（同样一条命令一个连接）
     python3 tools/smoke/rigs/rig_common.py -c "list" -c "gamerule doDaylightCycle"

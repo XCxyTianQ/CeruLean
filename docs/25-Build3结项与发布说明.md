@@ -60,7 +60,8 @@
 |---|---|---|---|
 | P0 最小检查 | 7/7 PASS | 7/7 PASS（`0035` 后） | 一致 |
 | M1 双活塞竞争（20 轮） | A=20 / B=0 | **B=20 / A=0** | **不一致（FAIL）**，见 §4 |
-| M2–M5 机制前置装置 | 6/6 PASS（3 轮） | 6/6 PASS（2 轮） | 逐条 detail 一致（**不进 L3 闸门**：m2 的落地 tick 判据在联跑里出现过 1/7 抖动） |
+| M2–M5 机制前置装置 | 6/6 PASS（3 轮） | 6/6 PASS（2 轮） | 逐条 detail 一致（**不进 L3 闸门**：m2 的落地 tick 判据在联跑里出现过抖动） |
+| **真正的 TNT 复制** | — | — | **未实现**：装置只测"推到位置 + 落地点燃"，没有"无损失刷出"；BUD 态用 `/setblock` 造不出来（docs/23 §11.10 有五组实测） |
 | M6/M7 对照 | PASS | PASS | 一致 |
 | P3 跨区域 | — | — | SKIP（本机只有 1 个区域） |
 | Paper 档 | — | — | SKIP（本机无 Paper 26.3 jar） |
@@ -96,8 +97,10 @@
 1. **EXP7 存储引擎（bLinear v4）**：按用户决定推迟到 Build 4（docs/24 §4 的四步方案、docs/22 §3 的风险评估保持有效）。
 2. **P4（`/tick freeze` / `/tick step`）**：未移植，因此 §4 的差异只能定位到"处理顺序"这一层。
 3. **P3 跨区域**：本机只能构造 1 个区域 ⇒ 永远 SKIP，不得伪装成 PASS。
-4. **M2–M4 的"复制判据"**：探针契约表达不了 BUD + tick 时序；且 Paper/CeruLean 默认
-   `allow-piston-duplication=false`（H3），三档必然不同，属配置差异而非语义 FAIL。
+4. **TNT / 地毯 / 铁轨复制都没有实现**（装置只测机制前置）。用 `/setblock` 造不出 BUD 态 TNT，
+   五组实测见 docs/23 §11.10；真复制需要实体 + 多 tick 预置的独立装置，留 Build 4。
+   另：Paper/CeruLean 默认 `allow-piston-duplication=false`（H3），即使装置做出来，三档也会分叉——
+   那属配置差异，不是语义 FAIL。
 5. **M5 更新抑制（CCE）**：契约不可表达（NBT / >512 层），只保留 S5 代理证据。
 6. **`0033` 的两项无运行时证据**：服务端上报协议 777，`minecraft-data` 无定义 ⇒ mineflayer 无法握手
    （`tools/smoke/player_join_probe.js` 已备好）。

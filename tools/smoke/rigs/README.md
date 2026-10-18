@@ -85,7 +85,7 @@ P3 跨区域时**故意**把 M6/M2 挪到边界两侧，那一步另建 origin�
 |---|---|---|---|---|---|
 | # | 文件 | 装置 | 依赖的不变量（§3） | 预期 vanilla 现象 | 状态（Lead 决策已定） |
 |---|---|---|---|---|---|
-| M2 | `m2_tnt_duper.json` | TNT：被推入“已有点燃位”后点燃 | S1 + S3 + S5 | `entity_min tnt 1` ✅；`block_max_in_box tnt 0` ✅（点燃即消耗，不留块） | vanilla **PASS**（3/3）；机制前置，**不是复制判据** |
+| M2 | `m2_tnt_push_precursor.json` | TNT：被推入“已有点燃位”后点燃 | S1 + S3 + S5 | `entity_min tnt 1` ✅；`block_max_in_box tnt 0` ✅（点燃即消耗，不留块） | vanilla **PASS**（3/3）；机制前置，**不是复制判据** |
 | M3 | `m3_carpet_duper.json` | 地毯：依附方块被活塞推动 | S3 + S5 | 地毯到目的地、全场景仅 1 块 | vanilla **PASS**（3/3）；机制前置，**不是复制判据** |
 | M4 | `m4_rail_duper.json` | 铁轨：红石元件类依附方块被推动 | S1 + S3 | 铁轨到目的地、仅 1 条 | vanilla **PASS**（3/3）；机制前置，**不是复制判据** |
 | M5 | `m5_suppression.json` | 更新抑制**代理**（移动 tick 不更新 / 落地 tick 才更新） | 原定 S1+S2+S6；本代理实测 S1 + S5 | `entity_min tnt 1` ✅、盒内 tnt 0 ✅ | vanilla **PASS**（3/3，S5 代理）；CCE 判据 **SKIP(2)**（§5.1） |
@@ -125,7 +125,7 @@ P3 跨区域时**故意**把 M6/M2 挪到边界两侧，那一步另建 origin�
 > **CeruLean 列（21:01 重建 jar，含 `0035`）：6/6 PASS × 2 轮，逐条断言细节与 vanilla 完全一致**（`rigs-cerulean.json`、`rigs-cerulean-run2.json`）。
 > 修复前该列是 SKIP（RCON 方块读命令抛 NPE），问题记录与修复过程见 **§10**。
 >
-> ⚠️ **已知不一致（未定位，2026-10-18）**：`m2_tnt_duper` 在 **L3 联跑上下文**里曾 **2/2 失败**，而**单独跑与本目录全量跑都是 3/3 通过**（vanilla 3 轮 + CeruLean 2 轮）。
+> ⚠️ **已知不一致（未定位，2026-10-18）**：`m2_tnt_push_precursor` 在 **L3 联跑上下文**里曾 **2/2 失败**，而**单独跑与本目录全量跑都是 3/3 通过**（vanilla 3 轮 + CeruLean 2 轮）。
 > 因此发布闸门 `tools/smoke/rigs/expected/gate_rigs.txt` 只收 **m6/m7**；m2–m5 不进闸门、仍可单独跑。
 > 最可能的解释是 400 ms 断言窗口在联跑负载下不够（活塞落地 tick 被拖后），但**未证实**；在拿到 L3 失败现场的 `checks` 与日志前，不要改断言或 `wait_ms`。
 
@@ -147,6 +147,10 @@ P3 跨区域时**故意**把 M6/M2 挪到边界两侧，那一步另建 origin�
 ### M2 · TNT
 结构：`tnt (0,0,0)`、`piston[facing=west] (1,0,0)`、目的地旁常驻 `redstone_block (-2,0,0)`；触发用 `(1,-1,0)` 的红石块
 （只给活塞供电，不与 TNT 相邻 → 放置那一刻不会点燃 TNT）。
+
+> ❗ **这不是 TNT 复制机**：装置原名 `m2_tnt_duper`，它只测「推到位置 + 落地 tick 点燃」这条机制前置，
+> **没有任何"无损失刷出"的断言**；TNT 复制目前**没有实现**（BUD 态用 `/setblock` 造不出来，
+> 五组实测见 `docs/23 §11.10`，原始日志 `reports/evidence/tnt-dupe-20261018/`）。
 
 时序（代码可推）：`moveBlocks` 把 TNT 移到 `(-1,0,0)`（目的地紧邻红石块）→ 下一 tick `PistonMovingBlockEntity.tick`
 做 `setBlock(newState, UPDATE_ALL|UPDATE_MOVE_BY_PISTON)` → `TntBlock.onPlace` 里 `hasNeighborSignal(pos)` 为真
@@ -465,7 +469,7 @@ python3 tools/smoke/rigs/rig_common.py --p0 --port 25576 --password test1234
 python3 tools/smoke/rigs/rig_common.py --rig tools/smoke/rigs/rigs/m6_control_push.json --json
 
 # 只校验 JSON 契约（不连服）
-python3 tools/smoke/rigs/rig_common.py --check-json tools/smoke/rigs/rigs/m2_tnt_duper.json
+python3 tools/smoke/rigs/rig_common.py --check-json tools/smoke/rigs/rigs/m2_tnt_push_precursor.json
 
 # 矩阵（本目录）：控制组先跑，一行一台
 python3 tools/smoke/rigs/run_rigs.py --port 25576 --password test1234 \
