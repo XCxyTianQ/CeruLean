@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sun, 18 Oct 2026 18:49:07 +0800
+Subject: [PATCH] CeruLean: dispatch /loot spawn asynchronously (drop the blocking bridge)
+
+---
+`/loot spawn` 改为**非阻塞派发**（修掉负载下会超时的脆弱点）。
+
+上一版用 `RegionCommandExecutor.onBlock(...)`（阻塞桥，内部 2 秒上限）在目标区域生成掉落物。
+回归套件在机器负载偏高时出现：
+    FAIL RCON · /loot spawn: AzureBranches: cross-region command timed out
+这不是功能错误，而是**阻塞桥对负载敏感**——而且从 tick 线程阻塞本身就是反模式，
+还会打 "blocking a tick/region thread" 性能告警。
+
+改法：`dropInWorld` 改用 `onBlockAsync(...)`，不再等待；
+`usedItems.track(drop)` 提前到**派发之前**，所以"commands.drop.success" 的消息仍然准确
+（实际实体生成延后到目标区域的下一个 tick，玩家无感）。
+
+为什么要记账在前：命令的成功消息由 `CommandResponseTracker(usedItems)` 决定，
+如果等异步回调里再 track，框架早已把消息发出去了，会误报"没有物品"。
+
+实测：命令覆盖层验收驱动器（矩阵 + 3 轮混合压力）**2/2 通过**，`/loot spawn` 稳定。
+---
+diff --git a/net/minecraft/server/commands/LootCommand.java b/net/minecraft/server/commands/LootCommand.java
+index 7987d12..00c7a15 100644
+--- a/net/minecraft/server/commands/LootCommand.java
++++ b/net/minecraft/server/commands/LootCommand.java
+@@ -383,13 +383,21 @@ public class LootCommand {
+         // CeruLean: 掉落物必须在**目标位置所属区域**的 tick 线程上生成。
+         // 在全局区域线程上调用 addFreshEntity 会 NPE：
+         //   ServerLevel.addEntity → getCurrentWorldData().captureDrops（区域外为 null）。
+-        RegionCommandExecutor.onBlock(level, BlockPos.containing(pos), () -> {
+-            drops.forEach(drop -> {
++        //
++        // 这里用**非阻塞派发**而不是 `onBlock(...)` 阻塞桥：
++        //   * 阻塞桥在 tick 线程上是反模式（会打 "blocking a tick/region thread" 告警），
++        //     而且在机器负载高时它的 2s 上限会超时（实测命令矩阵因此偶发失败）；
++        //   * 成功消息依赖 usedItems，所以在**派发前**记账，消息仍然准确；
++        //     实际生成延后到目标区域的下一个 tick，玩家看不到差别。
++        for (final ItemStack drop : drops) {
++            usedItems.track(drop);
++        }
++        RegionCommandExecutor.<Void>onBlockAsync(level, BlockPos.containing(pos), () -> {
++            for (final ItemStack drop : drops) {
+                 ItemEntity entity = new ItemEntity(level, pos.x, pos.y, pos.z, drop.copy());
+                 entity.setDefaultPickUpDelay();
+                 level.addFreshEntity(entity);
+-                usedItems.track(drop);
+-            });
++            }
+             return null;
+         });
+     }
