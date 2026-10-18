@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sun, 18 Oct 2026 17:21:54 +0800
+Subject: [PATCH] CeruLean EXP7Plus: enable entity team lookup and join-time scoreboard sync
+
+---
+EXP7Plus 的两处小改动（非存储部分）：
+
+1) `Entity.getTeam()` —— 解除 Folia 的硬禁用。
+   Folia 用 `if (true) return null;` 把实体→队伍的查询整个禁掉。本项目的 `Scoreboard`
+   在 `0022` 之后已经用并发容器 + `stateLock`，且 `PlayerTeam.players` 本身就是
+   `ConcurrentHashMap.newKeySet()`，所以任意区域线程上的队伍查询是安全的，可以整体放开。
+
+2) `PlayerList.updateEntireScoreboard` —— 恢复登录时的计分板同步。
+   计分板是**服务端全局数据**，原始调用在玩家区域线程上（Folia 因此注释掉）。改为经
+   `RegionCommandExecutor.onGlobalAsync(...)` 在全局 tick 线程上做。
+
+**验证限制（如实）**：这两处都只能在**真实客户端加入**时体现，而本机冒烟环境连不上客户端 ——
+服务端上报协议 **777**，`minecraft-data` 最新版（3.117.0）也没有该协议的定义，mineflayer 无法握手。
+已写好 `tools/smoke/player_join_probe.js`（真客户端加入 + 断言客户端收到计分板/队伍），
+等有匹配协议定义时可直接跑。因此本补丁的正确性依据是：
+  * 代码路径审查（并发容器已就绪、全局数据在全局 tick 上读）；
+  * 回归套件（尤其 R1 计分板压力与存档往返）证明没有引入回退。
+
+实测：`:cerulean-server:compileJava` 零错误。
+---
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 82fb4ae..7e65eee 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -274,7 +274,14 @@ public abstract class PlayerList {
+         this.sendPlayerPermissionLevel(player);
+         player.getStats().markAllDirty();
+         player.getRecipeBook().sendInitialRecipeBook(player);
+-        //this.updateEntireScoreboard(level.getScoreboard(), player); // Folia - region threading
++        // AzureBranches EXP7Plus: restore the Folia-disabled join-time scoreboard
++        // sync. Server-global data must be read on the global tick thread; the
++        // original call ran on the player's region thread (see the Folia comment).
++        final ServerLevel _expSyncLevel = level; // captured before the join event may move the player
++        net.minecraft.server.commands.RegionCommandExecutor.onGlobalAsync(() -> {
++            PlayerList.this.updateEntireScoreboard(_expSyncLevel.getScoreboard(), player);
++            return null;
++        });
+         this.server.invalidateStatus();
+         MutableComponent component;
+         if (player.getGameProfile().name().equalsIgnoreCase(oldName)) {
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 7b8d9cd..4fb0c21 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -3861,11 +3861,9 @@ public abstract class Entity
+     }
+ 
+     public @Nullable PlayerTeam getTeam() {
+-        // Folia start - region threading
+-        if (true) {
+-            return null;
+-        }
+-        // Folia end - region threading
++        // AzureBranches EXP7Plus: the scoreboard team maps are concurrent
++        // (ConcurrentHashMap, see Scoreboard.java transform), so this lookup is
++        // safe on any Folia thread - the hard disable is fully lifted.
+         if (!this.level().paperConfig().scoreboards.allowNonPlayerEntitiesOnScoreboards && !(this instanceof Player)) { return null; } // Paper - Perf: Disable Scoreboards for non players by default
+         return this.level().getScoreboard().getPlayersTeam(this.getScoreboardName());
+     }
