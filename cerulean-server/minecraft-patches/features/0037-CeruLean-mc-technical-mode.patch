@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sun, 18 Oct 2026 23:52:00 +0800
+Subject: [PATCH] CeruLean: 原版技术模式配置开关（TNT 复制等原版机制，默认关）
+
+---
+新增 [compat] mc_technical_mode（位于 azurebranches_global_config.toml），默认 false。
+为 true 时由 io.cerulean.regions.TechnicalMode 把 Paper unsupportedSettings 里的技术向
+开关置 true（对齐 Leaves 的 McTechnicalModeHelper#doMcTechnicalMode）：
+
+- allowPistonDuplication：TNT / 地毯 / 铁轨复制（核心项）
+- allowHeadlessPistons：无头活塞
+- allowPermanentBlockBreakExploits：永久方块（基岩、末地门等）可破坏
+- allowUnsafeEndPortalTeleportation：不安全的末地门传送（沙漏复制等）
+- skipTripwireHookPlacementValidation：绊线钩放置校验（绊线复制）
+
+调用点在本补丁唯一的改动文件 DedicatedServer.java：紧跟
+initializeGlobalConfiguration(...) 之后——GlobalConfiguration 的实例到这一行才创建，
+更早调用会拿到未初始化的配置对象；AzureBranchesConfig 则已在 MinecraftServer 的构造里
+初始化（补丁 0018），因此 TechnicalMode 用 getOrNull() 读开关是安全的。
+
+默认不写配置时开关为 false，TechnicalMode 直接 return，不改动任何
+GlobalConfiguration 字段，也不打日志——行为与未加本开关时完全一致。
+TechnicalMode 内部 catch Throwable 并只打警告，确保任何异常都不会让服务端起不来。
+---
+diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java
+index 762822c..678bc17 100644
+--- a/net/minecraft/server/dedicated/DedicatedServer.java
++++ b/net/minecraft/server/dedicated/DedicatedServer.java
+@@ -236,6 +236,11 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+         // Spigot end
+         // Paper start - initialize global and world-defaults configuration
+         this.paperConfigurations.initializeGlobalConfiguration(this.registryAccess());
++        // CeruLean start - 原版技术模式（[compat] mc_technical_mode）
++        // 必须放在 initializeGlobalConfiguration 之后：GlobalConfiguration 的实例在这一行才被创建；
++        // AzureBranchesConfig 更早已在 MinecraftServer 构造里初始化（补丁 0018）。
++        io.cerulean.regions.TechnicalMode.applyIfEnabled();
++        // CeruLean end - 原版技术模式
+         this.paperConfigurations.initializeWorldDefaultsConfiguration(this.registryAccess());
+         // Paper end - initialize global and world-defaults configuration
+         this.server.spark.enableEarlyIfRequested(); // Paper - spark

@@ -1,0 +1,209 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CeruLean <cerulean@local>
+Date: Sun, 18 Oct 2026 23:32:00 +0800
+Subject: [PATCH] CeruLean: port the /tick command (system-property gated) for per-tick observation
+
+---
+docs/23 §4 P4：把 Folia 注释掉的 /tick 命令移植回来，用于逐 tick 观测（freeze/step/query/rate）。
+
+参考实现是 Lophine 的 0047（5 文件 184 行）。唯一的设计改动：开关从 Lophine 的 config
+（GeneralCompatConfig.commandTick）换成**系统属性** cerulean.tickcommand
+（io.cerulean.regions.TickCommandCompat.enabled()，只求值一次），避免 config 加载时序问题。
+
+改动点（全部把"config 判断"换成 TickCommandCompat.enabled()）：
+- RegionizedServer.globalTick：补回 tickRateManager().tick()（上游 //tickRateManager.tick()
+  被注释后冻结/步进永远不会推进）；每 tick reduceSprintTicks() + endTickWork()；
+  tickTime() 加 runsNormally() 门控（冻结时世界时间不推进）。
+- TickRegionScheduler：TICK_RATE / TIME_BETWEEN_TICKS 由 final 常量改为可变
+  （/tick rate 与 sprint 会改写它们），runTick 里按速率/sprint 重算 tickCount，
+  每个区域 tick 结束调 endTickWork()。
+- Commands：TickCommand.register 改条件注册（默认仍不注册，与现状一致）。
+- ServerTickRateManager：新增 reduceSprintTicks()，注释掉 checkShouldSprintThisTick 里的递减
+  （Folia 没有单线程 tickServer 循环，递减改由上面两处显式驱动）。
+- TickCommand：MAX_TICKRATE 改 public；sprint 子命令按 Lophine 的做法注释掉
+  （只留 freeze / unfreeze / step / query / rate）。
+
+默认行为不变：不设 -Dcerulean.tickcommand=true 时 /tick 仍是
+"Unknown or incomplete command"。
+---
+diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
+index 075bef5..1c20062 100644
+--- a/io/papermc/paper/threadedregions/RegionizedServer.java
++++ b/io/papermc/paper/threadedregions/RegionizedServer.java
+@@ -233,6 +233,13 @@ public final class RegionizedServer {
+ 
+     private void globalTick(final long tickCount) {
+         ++this.tickCount;
++        // CeruLean start - /tick 命令支持（docs/23 §4 P4）：冻结/步进/速率由 TickRateManager 驱动，
++        // 上游 Folia 把这行注释掉了（MinecraftServer#tickServer 里的 //tickRateManager.tick()），
++        // 于是在 global tick 上补回来；默认关闭（TickCommandCompat.enabled() 为 false 时行为完全不变）。
++        if (io.cerulean.regions.TickCommandCompat.enabled()) {
++            MinecraftServer.getServer().tickRateManager().tick();
++        }
++        // CeruLean end - /tick 命令支持
+         // expire invalid click command callbacks
+         io.papermc.paper.adventure.providers.ClickCallbackProviderImpl.ADVENTURE_CLICK_MANAGER.handleQueue((int)this.tickCount); // Paper // Folia - region threading - moved to global tick
+         io.papermc.paper.adventure.providers.ClickCallbackProviderImpl.DIALOG_CLICK_MANAGER.handleQueue((int)this.tickCount); // Paper // Folia - region threading - moved to global tick
+@@ -259,6 +266,15 @@ public final class RegionizedServer {
+             this.globalTick(world, tickCount);
+         }
+ 
++        // CeruLean start - /tick 命令支持：sprint 的"每 tick 递减 + 计时收尾"原本在
++        // MinecraftServer#tickServer 里（本基座已注释），这里在 global tick 上每 tick 做一次。
++        if (io.cerulean.regions.TickCommandCompat.enabled()) {
++            net.minecraft.server.ServerTickRateManager rateManager = MinecraftServer.getServer().tickRateManager();
++            rateManager.reduceSprintTicks();
++            rateManager.endTickWork();
++        }
++        // CeruLean end - /tick 命令支持
++
+         // tick connections
+         this.tickConnections();
+ 
+@@ -410,7 +426,10 @@ public final class RegionizedServer {
+     }
+ 
+     private void tickTime(final ServerLevel world, final long tickCount) {
+-        if (world.tickTime) {
++        // CeruLean start - /tick 命令支持：冻结时世界时间不应继续推进（与上游 tickServer 的
++        // runsNormally() 门控一致）；未启用时退化成原来的 world.tickTime。
++        if ((!io.cerulean.regions.TickCommandCompat.enabled() || world.tickRateManager().runsNormally()) && world.tickTime) {
++        // CeruLean end - /tick 命令支持
+             world.serverLevelData.setGameTime(world.serverLevelData.getGameTime() + tickCount);
+         }
+     }
+diff --git a/io/papermc/paper/threadedregions/TickRegionScheduler.java b/io/papermc/paper/threadedregions/TickRegionScheduler.java
+index 5a72fa0..fc06975 100644
+--- a/io/papermc/paper/threadedregions/TickRegionScheduler.java
++++ b/io/papermc/paper/threadedregions/TickRegionScheduler.java
+@@ -40,8 +40,11 @@ public final class TickRegionScheduler {
+         }
+     }
+ 
+-    public static final int TICK_RATE = 20;
+-    public static final long TIME_BETWEEN_TICKS = 1_000_000_000L / TICK_RATE; // ns
++    // CeruLean start - /tick 命令支持：tick 速率与 tick 周期不再是编译期常量
++    // （`/tick rate` / sprint 会按 TickRateManager 改写它们）。
++    public static float TICK_RATE = 20;
++    public static long TIME_BETWEEN_TICKS = (long) (1_000_000_000L / TICK_RATE); // ns
++    // CeruLean end - /tick 命令支持
+     // Folia start - watchdog
+     public static final FoliaWatchdogThread WATCHDOG_THREAD = new FoliaWatchdogThread();
+     static {
+@@ -429,8 +432,25 @@ public final class TickRegionScheduler {
+             final long cpuStart = MEASURE_CPU_TIME ? THREAD_MX_BEAN.getCurrentThreadCpuTime() : 0L;
+             final long tickStart = System.nanoTime();
+ 
+-            // use max(), don't assume that tickStart >= scheduledStart
+-            final long tickCount = Math.max(1L, this.tickSchedule.getPeriodsAhead(TIME_BETWEEN_TICKS, tickStart));
++            // CeruLean start - /tick 命令支持：每 tick 按 TickRateManager 的暂定速率/冲刺状态
++            // 重算 tickCount 与 tick 周期（sprint 时按 MAX_TICKRATE 单 tick 推进）。
++            final long tickCount;
++            if (io.cerulean.regions.TickCommandCompat.enabled()) {
++                net.minecraft.server.ServerTickRateManager rateManager = MinecraftServer.getServer().tickRateManager();
++                if (rateManager.isSprinting() && rateManager.checkShouldSprintThisTick()) {
++                    TICK_RATE = net.minecraft.server.commands.TickCommand.MAX_TICKRATE;
++                    TIME_BETWEEN_TICKS = (long) (1_000_000_000L / TICK_RATE);
++                    tickCount = 1;
++                } else {
++                    TICK_RATE = rateManager.tickrate();
++                    TIME_BETWEEN_TICKS = (long) (1_000_000_000L / TICK_RATE);
++                    tickCount = Math.max(1L, this.tickSchedule.getPeriodsAhead(TIME_BETWEEN_TICKS, tickStart));
++                }
++            } else {
++                // use max(), don't assume that tickStart >= scheduledStart
++                tickCount = Math.max(1L, this.tickSchedule.getPeriodsAhead(TIME_BETWEEN_TICKS, tickStart));
++            }
++            // CeruLean end - /tick 命令支持
+ 
+             if (!this.tryMarkTicking()) {
+                 if (!this.cancelled.get()) {
+@@ -479,6 +499,11 @@ public final class TickRegionScheduler {
+             try {
+                 // next start isn't updated until the end of this tick
+                 this.tickRegion(tickCount, tickStart, scheduledEnd);
++                // CeruLean start - /tick 命令支持：sprint 计时在每个区域 tick 结束时收尾
++                if (io.cerulean.regions.TickCommandCompat.enabled()) {
++                    MinecraftServer.getServer().tickRateManager().endTickWork();
++                }
++                // CeruLean end - /tick 命令支持
+             } catch (final Throwable thr) {
+                 this.scheduler.regionFailed(this, false, thr);
+                 // regionFailed will schedule a shutdown, so we should avoid letting this region tick further
+diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
+index 57e277f..b511f92 100644
+--- a/net/minecraft/commands/Commands.java
++++ b/net/minecraft/commands/Commands.java
+@@ -276,7 +276,12 @@ public class Commands {
+         TeleportCommand.register(this.dispatcher);
+         TellRawCommand.register(this.dispatcher, context);
+         //TestCommand.register(this.dispatcher, context); // Folia - region threading
+-        //TickCommand.register(this.dispatcher); // Folia - region threading - TODO later
++        // CeruLean start - /tick 命令支持（docs/23 §4 P4）：默认仍不注册（Folia - region threading），
++        // 只有 -Dcerulean.tickcommand=true 时才注册；只开 freeze/unfreeze/step/query/rate。
++        if (io.cerulean.regions.TickCommandCompat.enabled()) {
++            TickCommand.register(this.dispatcher); // Folia - region threading - TODO later
++        }
++        // CeruLean end - /tick 命令支持
+         TimeCommand.register(this.dispatcher, context);
+         TitleCommand.register(this.dispatcher, context);
+         TriggerCommand.register(this.dispatcher); // CeruLean - 重新启用 trigger（玩家区域线程上执行，见 0031）
+diff --git a/net/minecraft/server/ServerTickRateManager.java b/net/minecraft/server/ServerTickRateManager.java
+index eeb2f88..e89d3f6 100644
+--- a/net/minecraft/server/ServerTickRateManager.java
++++ b/net/minecraft/server/ServerTickRateManager.java
+@@ -110,7 +110,10 @@ public class ServerTickRateManager extends TickRateManager {
+             return false;
+         } else if (this.remainingSprintTicks > 0L) {
+             this.sprintTickStartTime = System.nanoTime();
+-            this.remainingSprintTicks--;
++            // CeruLean start - /tick 命令支持：递减改到 RegionizedServer/TickRegionScheduler 的每 tick 驱动里
++            // （由 reduceSprintTicks() 显式调用），因为 Folia 没有单线程 tickServer 循环可以递减。
++            // this.remainingSprintTicks--;
++            // CeruLean end - /tick 命令支持
+             return true;
+         } else {
+             this.finishTickSprint();
+@@ -118,6 +121,12 @@ public class ServerTickRateManager extends TickRateManager {
+         }
+     }
+ 
++    // CeruLean start - /tick 命令支持：sprint 递减的显式入口（见 checkShouldSprintThisTick）
++    public void reduceSprintTicks() {
++        this.remainingSprintTicks--;
++    }
++    // CeruLean end - /tick 命令支持
++
+     public void endTickWork() {
+         this.sprintTimeSpend = this.sprintTimeSpend + (System.nanoTime() - this.sprintTickStartTime);
+     }
+diff --git a/net/minecraft/server/commands/TickCommand.java b/net/minecraft/server/commands/TickCommand.java
+index a3cc2a2..9655bbe 100644
+--- a/net/minecraft/server/commands/TickCommand.java
++++ b/net/minecraft/server/commands/TickCommand.java
+@@ -17,7 +17,7 @@ import net.minecraft.server.ServerTickRateManager;
+ import net.minecraft.util.TimeUtil;
+ 
+ public class TickCommand {
+-    private static final float MAX_TICKRATE = 10000.0F;
++    public static final float MAX_TICKRATE = 10000.0F; // CeruLean - /tick 命令支持：sprint 需要读它
+     private static final String DEFAULT_TICKRATE = String.valueOf(20);
+     private static final SimpleCommandExceptionType ERROR_TICK_STEP_NOT_FROZEN = new SimpleCommandExceptionType(
+         Component.translatable("commands.tick.step.fail")
+@@ -52,6 +52,8 @@ public class TickCommand {
+                                 .executes(c -> step(c.getSource(), IntegerArgumentType.getInteger(c, "time")))
+                         )
+                 )
++                /* CeruLean - /tick 命令支持：sprint 子命令在 Folia 基座上没有可靠的"单线程冲刺"语义
++                   （RegionizedServer 已改为每 tick 显式 reduceSprintTicks），先按参考实现 Lophine 0047 注释掉。
+                 .then(
+                     Commands.literal("sprint")
+                         .then(Commands.literal("stop").executes(c -> stopSprinting(c.getSource())))
+@@ -61,6 +63,7 @@ public class TickCommand {
+                                 .executes(c -> sprint(c.getSource(), IntegerArgumentType.getInteger(c, "time")))
+                         )
+                 )
++                */
+                 .then(Commands.literal("unfreeze").executes(c -> setFreeze(c.getSource(), false)))
+                 .then(Commands.literal("freeze").executes(c -> setFreeze(c.getSource(), true)))
+         );

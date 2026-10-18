@@ -40,6 +40,8 @@ public final class AzureBranchesConfig {
     private int exp4DeferredMaxActions;
     private String storageRegionFormat;
     private int storageCompressionLevel;
+    /** [compat] mc_technical_mode：原版技术模式（TNT/地毯复制等原版技术机制），默认关闭。 */
+    private boolean mcTechnicalMode;
 
     private AzureBranchesConfig(Path serverRoot) throws IOException {
         this.filePath = serverRoot.resolve(FILE_NAME);
@@ -190,6 +192,7 @@ public final class AzureBranchesConfig {
         exp4DeferredMaxActions=getInt("command_blocks.exp4.deferred_actions.max_per_phase",256);
         storageRegionFormat=getString("storage.region_format","mca");
         storageCompressionLevel=getInt("storage.linear.compression_level",1);
+        mcTechnicalMode=getBool("compat.mc_technical_mode",false);
         entityLimitTypes.clear();
         for (Map.Entry<String,Object> e : values.entrySet()) {
             if (e.getKey().startsWith("entity_limits.types.") && e.getValue() instanceof Map) {
@@ -228,6 +231,7 @@ public final class AzureBranchesConfig {
         setDefault("command_blocks.exp4.deferred_actions.max_per_phase",256L);
         setDefault("storage.region_format","mca");
         setDefault("storage.linear.compression_level",1L);
+        setDefault("compat.mc_technical_mode",false);
     }
 
     private void setDefault(String key, Object value) { if(!values.containsKey(key))values.put(key,value); }
@@ -257,4 +261,5 @@ public final class AzureBranchesConfig {
     public int exp4DeferredMaxActions() { return exp4DeferredMaxActions; }
     public String storageRegionFormat() { return storageRegionFormat; }
     public int storageCompressionLevel() { return storageCompressionLevel; }
+    public boolean mcTechnicalMode() { return mcTechnicalMode; }
 }

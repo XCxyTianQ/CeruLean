@@ -10,6 +10,8 @@
 #   RCON_PASSWORD=test1234  RCON 密码
 #   JAVA_HOME=...           默认 ~/.harmonybrew/opt/openjdk@25
 #   JAVA_MEM=2G             堆上限
+#   JAVA_OPTS=              额外的 JVM 参数，原样透传给 java（默认空 ⇒ 行为与不加时完全一致）
+#                           例：JAVA_OPTS=-Dcerulean.tickcommand=true 打开 /tick 命令（docs/23 §4 P4）
 set -e
 
 # 脚本目录必须先绝对化：后面会 cd 进运行目录，届时相对路径会失效（实测踩过：
@@ -72,10 +74,10 @@ cd "$RUN_DIR"
 # 而不是 paperclip 容器）；否则用 java -jar（paperclip 容器自带依赖）。
 if [ -n "${MC_LIBS_DIR:-}" ]; then
   echo "  以 classpath 方式启动：$JAR + $MC_LIBS_DIR/*"
-  nohup "$JAVA_BIN" "-Xmx$JAVA_MEM" -cp "$JAR:$MC_LIBS_DIR/*" org.bukkit.craftbukkit.Main \
+  nohup "$JAVA_BIN" "-Xmx$JAVA_MEM" $JAVA_OPTS -cp "$JAR:$MC_LIBS_DIR/*" org.bukkit.craftbukkit.Main \
     --nogui --port "$MC_PORT" > "$RUN_DIR/server-console.log" 2>&1 &
 else
-  nohup "$JAVA_BIN" "-Xmx$JAVA_MEM" -jar "$JAR" --nogui --port "$MC_PORT" \
+  nohup "$JAVA_BIN" "-Xmx$JAVA_MEM" $JAVA_OPTS -jar "$JAR" --nogui --port "$MC_PORT" \
     > "$RUN_DIR/server-console.log" 2>&1 &
 fi
 echo $! > "$RUN_DIR/server.pid"
